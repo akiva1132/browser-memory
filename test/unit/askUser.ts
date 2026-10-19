@@ -5,18 +5,18 @@
  * using it and go back to doing the whole task themselves.
  *
  * So the cases below are mostly about when it returns and when it refuses to:
- * on a page change with no reply at all, on a reply with no page change, and
- * — the one that would silently ruin it — never just because the client had no
- * way to ask.
+ * on a page change with no reply at all, never just because the message was
+ * delivered, and — the one that silently ruined it before 20/10 — never by
+ * waiting out a timeout when the message could not be sent at all.
  *
- * Driven with a fake browser, because the interesting states (a client that
- * cannot elicit, a user who never answers) are precisely the ones that are hard
- * to stage against a real one.
+ * Driven with a fake browser and a fake notifier, because the interesting
+ * states (a send that fails, a user who never acts) are precisely the ones that
+ * are hard to stage against a real one.
  */
 import assert from 'node:assert/strict';
 
 import { askUserTools } from '../../src/browser/askUser.ts';
-import type { AskDeps, ToolResult } from '../../src/browser/askUser.ts';
+import type { AskDelivery, AskDeps, ToolResult } from '../../src/browser/askUser.ts';
 
 type Fake = {
   deps: AskDeps;
@@ -26,8 +26,10 @@ type Fake = {
 
 const text = (value: string): ToolResult => ({ content: [{ type: 'text', text: value }] });
 
-/** `ask` never resolving is the normal case: most users just act on the page. */
-function fake(options: { ask?: () => Promise<boolean> } = {}): Fake {
+const sent = async (): Promise<AskDelivery> => ({ ok: true });
+
+/** Delivered is the normal case; the user then acts on the page and never replies. */
+function fake(options: { ask?: AskDeps['ask'] } = {}): Fake {
   const page = { url: 'https://site.example/login', text: 'Verify you are human' };
   const calls: { name: string; args: Record<string, unknown> }[] = [];
   return {
@@ -46,17 +48,19 @@ function fake(options: { ask?: () => Promise<boolean> } = {}): Fake {
         }
         return text('ok');
       },
-      ask: options.ask ?? (() => new Promise<boolean>(() => {})),
+      ask: options.ask ?? sent,
     },
   };
 }
 
 const tool = (f: Fake) => askUserTools(f.deps)[0]!;
+const polls = (f: Fake) => f.calls.filter(call => call.name === 'browser_evaluate').length;
 
 // ── it raises the agent's own tab, not whichever one is on screen ────────────
 {
-  const f = fake({ ask: async () => true });
-  await tool(f).handle({ need: 'captcha', what: 'Tick the box' });
+  const f = fake();
+  setTimeout(() => { f.page.url = 'https://site.example/done'; }, 1600);
+  await tool(f).handle({ need: 'captcha', what: 'Tick the box', timeoutSeconds: 10 });
   const select = f.calls.find(call => call.name === 'browser_tabs' && call.args['action'] === 'select');
   assert.ok(select, 'the tab must be raised before the user is asked about it');
   assert.equal(select.args['index'], 1, 'and it must be the index the listing marked as ours');
@@ -88,30 +92,81 @@ const tool = (f: Fake) => askUserTools(f.deps)[0]!;
   console.log('  a URL change releases it when nothing else was named');
 }
 
-// ── a reply releases it even if the page looks unchanged ─────────────────────
+// ── exactly one message per ask ──────────────────────────────────────────────
 {
-  const f = fake({ ask: async () => true });
-  const result = await tool(f).handle({
-    need: 'form-field', what: 'Fill in the VAT number', untilTextGone: 'Verify you are human',
-    timeoutSeconds: 20,
-  });
-  assert.match(result, /has done it/);
-  assert.doesNotMatch(result, /page changed/, 'nothing on the page moved; do not claim it did');
-  console.log('  a reply releases it with no page change');
+  const titles: string[] = [];
+  const f = fake({ ask: async title => { titles.push(title); return { ok: true }; } });
+  setTimeout(() => { f.page.url = 'https://site.example/done'; }, 1600);
+  await tool(f).handle({ need: 'captcha', what: 'Tick the box', timeoutSeconds: 10 });
+  assert.deepEqual(titles, ['Your turn: Tick the box'], 'exactly one message per ask');
+  console.log('  one message per ask');
 }
 
-// ── the failure that would quietly ruin it ───────────────────────────────────
+// ── delivered is not done: the page still has to change ──────────────────────
 {
-  const f = fake({ ask: async () => false });
+  const f = fake();
   const started = Date.now();
   setTimeout(() => { f.page.text = 'Welcome back'; }, 2000);
   const result = await tool(f).handle({
     need: 'captcha', what: 'Tick the box', untilTextGone: 'Verify you are human', timeoutSeconds: 20,
   });
-  assert.ok(Date.now() - started > 1500,
-      'a client that cannot ask must not be read as the user saying "no, carry on"');
-  assert.match(result, /has done it/, 'the page watcher is what releases it when nobody can be asked');
-  console.log('  a client that cannot elicit still waits for the page');
+  assert.ok(Date.now() - started > 1500, 'a delivered message must not be read as the user having done it');
+  assert.match(result, /has done it/, 'the page watcher is what releases it');
+  console.log('  a delivered message still waits for the page');
+}
+
+// ── a failed send is an error now, not a silent wait ─────────────────────────
+//
+// The measured failure: the notifier broke, the failure went to the trace only,
+// and the agent sat out the whole timeout for a user who had been told nothing.
+{
+  const f = fake({ ask: async () => ({ ok: false, reason: 'telegram send via telegram-send failed: 401' }) });
+  const started = Date.now();
+  await assert.rejects(
+      () => tool(f).handle({
+        need: 'captcha', what: 'Tick the box', untilTextGone: 'Verify you are human', timeoutSeconds: 60,
+      }),
+      (error: Error) => {
+        assert.match(error.message, /NOT notified/);
+        assert.match(error.message, /401/, 'the reason must reach the agent, not only the trace');
+        assert.match(error.message, /Tick the box/, 'and so must what the user is needed for');
+        return true;
+      });
+  const took = Date.now() - started;
+  assert.ok(took < 3000, `it must fail at once, not wait out the timeout — took ${took}ms`);
+  const at = polls(f);
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  assert.equal(polls(f), at, 'and it must not leave a watcher polling behind it');
+  console.log(`  a failed send returns a visible error in ${took}ms`);
+}
+
+// ── a notifier that throws is the same failure, not a crash or a hang ────────
+{
+  const f = fake({ ask: async () => { throw new Error('spawn telegram-send ENOENT'); } });
+  await assert.rejects(
+      () => tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 60 }),
+      /NOT notified.*ENOENT/);
+  console.log('  a throwing notifier is reported the same way');
+}
+
+// ── nothing to wait for is answered now, not in a minute ─────────────────────
+//
+// The marker was already true before anyone was asked, so the page watcher can
+// never see the change, and no reply comes back through the chat channel. Only
+// the expiry timer would be left.
+{
+  const f = fake();
+  const started = Date.now();
+  const result = await tool(f).handle({
+    need: 'login', what: 'Sign in with your Google account',
+    untilTextAppears: 'Verify you are human', timeoutSeconds: 60,
+  });
+  const waited = Date.now() - started;
+  assert.ok(waited < 5_000, `must not sit out the timeout with nothing to wait for — waited ${waited}ms`);
+  assert.match(result, /no way to tell when it is finished/);
+  assert.match(result, /untilTextAppears/, 'the useless marker is the thing to name');
+  assert.ok(!/user has done it/.test(result), 'and it must not claim success: nothing here is evidence');
+  console.log(`  no signal either way: answered in ${waited}ms instead of 60s`);
 }
 
 // ── giving up says so, without failing the task ──────────────────────────────
@@ -120,7 +175,7 @@ const tool = (f: Fake) => askUserTools(f.deps)[0]!;
   const result = await tool(f).handle({
     need: 'captcha', what: 'Tick the box', untilTextGone: 'Verify you are human', timeoutSeconds: 5,
   });
-  assert.match(result, /has not been done yet/);
+  assert.match(result, /probably not been done yet/);
   assert.match(result, /Do not retry the step yourself/, 'a timeout must not send it back to guessing');
   console.log('  a timeout reports honestly and forbids retrying the step');
 }
@@ -132,34 +187,10 @@ const tool = (f: Fake) => askUserTools(f.deps)[0]!;
     need: 'consent', what: 'Accept the cookie banner', untilTextGone: 'text that was never there',
     timeoutSeconds: 5,
   });
-  assert.match(result, /has not been done yet/,
+  assert.doesNotMatch(result, /user has done it/,
       'text that was already absent would otherwise report success in zero seconds');
-  console.log('  an already-satisfied condition does not fake instant success');
-}
-
-// ── nothing to wait for is answered now, not in three minutes ───────────────
-//
-// Both signals gone at once: the marker was already true before anyone was
-// asked, so the page watcher stands down, and the client cannot elicit, so no
-// reply is coming either. That left the expiry timer alone in the race — the
-// tool sat out its whole timeout, up to fifteen minutes by default, over a
-// condition it had already decided it could not measure.
-{
-  const f = fake({ ask: async () => false });
-  const started = Date.now();
-  const result = await tool(f).handle({
-    need: 'login', what: 'Sign in with your Google account',
-    // Already on the page before anyone was asked, so it can never mark the
-    // change it was given to mark.
-    untilTextAppears: 'Verify you are human', timeoutSeconds: 60,
-  });
-  const waited = Date.now() - started;
-  assert.ok(waited < 5_000, `must not sit out the timeout with nothing to wait for — waited ${waited}ms`);
   assert.match(result, /no way to tell when it is finished/);
-  assert.match(result, /untilTextAppears/, 'the useless marker is the thing to name');
-  assert.ok(!/user has done it/.test(result),
-      'and it must not claim success: nothing here is evidence either way');
-  console.log(`  no signal either way: answered in ${waited}ms instead of 60s`);
+  console.log('  an already-satisfied condition does not fake instant success');
 }
 
 // ── it stops interrogating the page once it is released ──────────────────────

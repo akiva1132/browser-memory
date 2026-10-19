@@ -3,25 +3,21 @@ import { execFile } from 'node:child_process';
 import { trace } from './context.ts';
 
 /**
- * Reaching the person when the client cannot reach them.
+ * Reaching the person, wherever they actually are.
  *
- * `requestUserAction` asks through the MCP client, which is right on a laptop:
- * the prompt appears in the window the user is already looking at. On a server
- * it is a dead end. A session driven from Telegram, from `claude -p`, or from a
- * scheduled job declares no elicitation capability at all, so the ask is never
- * made — the tool falls straight through to watching the page and times out
- * three minutes later having told nobody anything. From the user's side the
- * agent simply hangs.
+ * This is the only way `browser_ask_user` reaches anyone. It used to be the
+ * fallback behind MCP elicitation, and the trace showed what that cost: 53 of
+ * 62 asks went to a client prompt that a phone Remote Control session or an
+ * unattended run never shows, and the tool waited out its timeout with nobody
+ * told. The chat app is the one place the user reliably is: a CAPTCHA
+ * screenshot lands on their phone, they act on it, and the page watcher in
+ * askUser notices without them replying to anything.
  *
- * So when the client cannot ask, the message goes out of band instead. The
- * chat app is the right channel because it is the one place the user actually
- * is: a CAPTCHA screenshot lands on their phone, they glance at it, and the
- * page watcher in askUser notices the challenge clear without them replying to
- * anything.
- *
- * Everything here is opt-in through the environment. With `BROWSER_ASK_TARGET`
- * unset this is a no-op, which is exactly what the laptop wants — there the
- * client can ask, and a second notification would be noise.
+ * Configured through the environment: `BROWSER_ASK_TARGET` (chat id),
+ * `BROWSER_ASK_CHANNEL`, and `BROWSER_ASK_CMD` (anything speaking
+ * `message send --channel C -t T -m M [--media F]`; defaults to `openclaw` for
+ * history, but on the server it is `~/bin/telegram-send`). Unset target is
+ * reported as a failure, not treated as a quiet no-op.
  */
 
 /** Long enough for an image upload, short enough not to stall the ask. */
@@ -45,15 +41,26 @@ function whereToAct(): string {
 }
 
 /**
- * Returns true only when the message was handed off successfully. A false here
- * is not "the user said no" — it means nobody was told, and the caller should
- * keep behaving as though the request is still unanswered.
+ * What happened to one send. `ok: false` is not "the user said no" — it means
+ * nobody was told, and `reason` says why in words the agent can repeat. The
+ * caller is expected to surface it: a send that failed silently is exactly how
+ * three of nine Telegram asks vanished before 20/10.
  */
+export type NotifyResult = { ok: true } | { ok: false; reason: string };
+
+/** Bot tokens (`123456:AA…`, bare or in an API URL) never reach a tool result or the trace. */
+export const scrub = (value: string): string =>
+  value.replace(/\d{6,}:[\w-]{30,}/g, '«redacted»').replace(/\s+/g, ' ').trim().slice(0, 300);
+
 export async function notifyOutOfBand(
-    title: string, message: string, options: NotifyOptions = {}): Promise<boolean> {
+    title: string, message: string, options: NotifyOptions = {}): Promise<NotifyResult> {
   const target = env('BROWSER_ASK_TARGET');
-  if (!target)
-    return false;
+  if (!target) {
+    return {
+      ok: false,
+      reason: 'no out-of-band channel is configured (BROWSER_ASK_TARGET is unset), so the user cannot be reached',
+    };
+  }
 
   const channel = env('BROWSER_ASK_CHANNEL') || 'telegram';
   const command = env('BROWSER_ASK_CMD') || 'openclaw';
@@ -63,21 +70,23 @@ export async function notifyOutOfBand(
   if (options.mediaPath)
     args.push('--media', options.mediaPath);
 
-  return new Promise<boolean>(resolve => {
-    execFile(command, args, { timeout: SEND_TIMEOUT_MS }, error => {
+  return new Promise<NotifyResult>(resolve => {
+    execFile(command, args, { timeout: SEND_TIMEOUT_MS }, (error, _stdout, stderr) => {
       if (error) {
-        /*
-         * Worth tracing rather than throwing. This runs inside an ask that is
-         * already the fallback path; making the whole tool fail because the
-         * notifier is misconfigured would replace a silent hang with a loud
-         * one and still leave the user stuck.
-         */
-        trace.write('gate', 'notify', `${channel} send failed: ${error.message}`, { ok: false });
-        resolve(false);
+        // Stderr first; the exec error's own message is mostly the command line,
+        // which echoes the user-facing text back instead of saying what broke.
+        const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+        const detail = scrub(String(stderr ?? ''))
+          || (failure.killed ? `timed out after ${SEND_TIMEOUT_MS / 1000}s` : '')
+          || (typeof failure.code === 'number' ? `exited with code ${failure.code}` : '')
+          || (failure.code ? String(failure.code) : '')
+          || scrub(error.message);
+        trace.write('gate', 'notify', `${channel} send failed: ${detail}`, { ok: false });
+        resolve({ ok: false, reason: `${channel} send via ${command} failed: ${detail}` });
         return;
       }
       trace.write('gate', 'notify', `asked the user over ${channel}`, { ok: true });
-      resolve(true);
+      resolve({ ok: true });
     });
   });
 }

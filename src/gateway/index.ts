@@ -262,9 +262,8 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
   };
   trace.write('call', name, describeArgs(args) || '(no arguments)', { phase: 'enter' });
 
-  // Recorded once per connection, because how this server can reach the user
-  // depends entirely on it: without elicitation the only way to ask for a
-  // CAPTCHA to be solved is the agent's own message plus watching the page.
+  // Recorded once per connection: elicitation still gates procedure_save, and
+  // the record is how 20/10 showed asks being raised into unwatched prompts.
   if (!capabilitiesLogged) {
     capabilitiesLogged = true;
     audit.record({

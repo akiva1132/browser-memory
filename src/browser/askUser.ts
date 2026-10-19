@@ -25,24 +25,32 @@ export type { ToolResult };
  * CAPTCHA" is useless unless the page in question is actually on screen.
  *
  * And it returns the moment the user acts, without them having to say so. The
- * ask goes out through the client's own prompt, but at the same time the page
- * is watched for the thing that was asked for: the URL changing, the challenge
- * disappearing, the dashboard appearing. Whichever happens first releases it.
- * Telling a chat window "ok done" after already doing the thing is exactly the
- * kind of double work that makes people stop using a tool.
+ * ask goes out as a message to their phone, and then the page is watched for
+ * the thing that was asked for: the URL changing, the challenge disappearing,
+ * the dashboard appearing. Telling a chat window "ok done" after already doing
+ * the thing is exactly the kind of double work that makes people stop using a
+ * tool.
+ *
+ * It never asks through the MCP client's elicitation prompt. Clients advertise
+ * that capability in sessions no human is watching (phone Remote Control,
+ * `claude -p`), and the measured result was asks that reached nobody. And a
+ * send that fails is returned to the agent as an error, immediately — waiting
+ * out a timeout for a user who was never told is the failure being fixed.
  */
 
 export type AskDeps = {
   /** Upstream browser call. Deliberately the un-observed path: this reads pages mid-login. */
   call: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
   /**
-   * Puts the request in front of the user through the client they are already
-   * using, so it obeys whatever permission rules they have chosen rather than
-   * inventing a second set. Resolves false when the client cannot ask, which is
-   * not a refusal — the watcher below still runs.
+   * Sends the request to wherever the user actually is (Telegram, out of band).
+   * Resolves with whether it was delivered; it is never the user's answer —
+   * only the page watcher below can see them act. A failed delivery carries a
+   * reason, which is returned to the agent rather than swallowed.
    */
-  ask: (title: string, message: string, mediaPath?: string) => Promise<boolean>;
+  ask: (title: string, message: string, mediaPath?: string) => Promise<AskDelivery>;
 };
+
+export type AskDelivery = { ok: true } | { ok: false; reason: string };
 
 const POLL_MS = 1500;
 const DEFAULT_TIMEOUT_S = 180;
@@ -175,9 +183,10 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         `- ${NEEDS.payment} — never type a card number yourself\n` +
         `- ${NEEDS['form-field']} — a plausible guess in a real form is worse than a question\n` +
         `- ${NEEDS.consent}\n\n` +
-        'This brings your tab to the front so the user is looking at the right page, asks them through ' +
-        'their own client, and then waits. It returns as soon as the page shows they are done — they do ' +
-        'not have to come back and tell you. Give `untilTextGone` or `untilTextAppears` when you can ' +
+        'This brings your tab to the front, sends the user a message on their phone with a screenshot ' +
+        'of the page, and then waits. It returns as soon as the page shows they are done — they do ' +
+        'not have to come back and tell you. If the message cannot be sent, it fails at once and says ' +
+        'why; then tell the user yourself, in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
         'name what will change, and it will notice within a second or two instead of waiting for a URL ' +
         'change.\n\n' +
         'Say what you need in plain language, as if to someone who cannot see your reasoning.',
@@ -225,95 +234,83 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
           `do it there and I will carry on by myself. You do not need to reply here.`;
 
         /*
-         * Held in an object rather than a bare `let`, so the compiler keeps the
-         * whole union in view: assigned only from callbacks, a plain variable
-         * narrows to its initial value and every later comparison reads as
-         * unreachable.
-         */
-        const outcome: { via: 'user-said-so' | 'page-changed' | 'timeout' | 'nothing-to-watch' } =
-          { via: 'timeout' };
-        const deadline = Date.now() + seconds * 1000;
-        /**
-         * Everything below stops the moment one of them wins. Without it the
-         * watcher keeps interrogating the page for the rest of the timeout
-         * after the user has already finished — dozens of pointless round trips
-         * against a live browser, and a process that will not exit.
-         */
-        let settled = false;
-
-        /**
-         * Only ever settles on success. A client that cannot elicit answers
-         * "no" immediately, and a race that treated that as an outcome would
-         * abandon the user mid-CAPTCHA a millisecond after asking them.
-         */
-        const pending = new Promise<void>(() => {});
-
-        /*
          * Taken here rather than earlier: after the tab is raised, so it is the
          * page being asked about, and as late as possible, because anything with
          * a countdown on it is worth least the moment after it is captured.
          */
         const shot = await pageShot(deps);
 
-        const answered = deps.ask(`Your turn: ${what.slice(0, 80)}`, message, shot)
-            .then(ok => {
-              if (ok && !settled) {
-                settled = true;
-                outcome.via = 'user-said-so';
-                return undefined;
-              }
-              /*
-               * A client that cannot elicit answers "no" immediately, and the
-               * page watcher is already standing down because the marker was
-               * true before anyone was asked. With both of those, the only
-               * thing left in the race is the expiry timer — so the tool sat
-               * out its whole timeout, up to fifteen minutes, over a condition
-               * it had already decided it could not measure. Nothing is going
-               * to arrive; say so now rather than in three minutes.
-               */
-              if (!ok && alreadySatisfied && !settled) {
-                settled = true;
-                outcome.via = 'nothing-to-watch';
-                return undefined;
-              }
-              return pending;
-            })
-            .catch(() => pending);
+        /*
+         * Sent before anything waits. A delivery that failed is the one outcome
+         * that must never turn into a silent timeout: nobody was told, so there
+         * is nothing to wait for. Thrown, it reaches the agent as an error
+         * result with the reason in it.
+         */
+        const delivery: AskDelivery = await deps.ask(`Your turn: ${what.slice(0, 80)}`, message, shot)
+            .catch((error: unknown) => ({ ok: false as const, reason: String(error) }));
+        if (!delivery.ok) {
+          throw new Error(
+              `the user was NOT notified — ${delivery.reason}. Nobody knows this step is waiting. ` +
+              `Do not wait for it and do not retry the step yourself: tell the user directly, in your ` +
+              `reply, what is needed (${what}), and report the notification failure.`);
+        }
 
-        const watched = (async (): Promise<void> => {
-          if (alreadySatisfied)
-            return pending;
-          while (!settled && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, POLL_MS));
-            if (settled)
-              return pending;
-            const now = await probe(deps, marker).catch(() => undefined);
-            if (!now)
-              continue;
-            const done = gone
-              ? !now.present
-              : appears
-                ? now.present
-                : Boolean(now.url) && now.url !== before.url;
-            if (done) {
-              settled = true;
-              outcome.via = 'page-changed';
-              return;
+        /*
+         * Held in an object rather than a bare `let`, so the compiler keeps the
+         * whole union in view: assigned only from callbacks, a plain variable
+         * narrows to its initial value and every later comparison reads as
+         * unreachable.
+         */
+        const outcome: { via: 'page-changed' | 'timeout' | 'nothing-to-watch' } = { via: 'timeout' };
+        const deadline = Date.now() + seconds * 1000;
+        /**
+         * Stops the watcher the moment the wait is over. Without it the watcher
+         * keeps interrogating the page for the rest of the timeout after the
+         * user has already finished — dozens of pointless round trips against a
+         * live browser, and a process that will not exit.
+         */
+        let settled = false;
+
+        if (alreadySatisfied) {
+          /*
+           * The marker was already true before anyone was asked, so it cannot
+           * mark the change, and no reply is coming back through this channel.
+           * Nothing would be left in the race but the expiry timer; say so now
+           * rather than in fifteen minutes.
+           */
+          outcome.via = 'nothing-to-watch';
+        } else {
+          const watched = (async (): Promise<void> => {
+            while (!settled && Date.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, POLL_MS));
+              if (settled)
+                return;
+              const now = await probe(deps, marker).catch(() => undefined);
+              if (!now)
+                continue;
+              const done = gone
+                ? !now.present
+                : appears
+                  ? now.present
+                  : Boolean(now.url) && now.url !== before.url;
+              if (done) {
+                settled = true;
+                outcome.via = 'page-changed';
+                return;
+              }
             }
-          }
-          return pending;
-        })();
+          })();
 
-        let expiry: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            answered,
-            watched,
-            new Promise(resolve => { expiry = setTimeout(resolve, seconds * 1000); }),
-          ]);
-        } finally {
-          settled = true;
-          clearTimeout(expiry);
+          let expiry: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              watched,
+              new Promise(resolve => { expiry = setTimeout(resolve, seconds * 1000); }),
+            ]);
+          } finally {
+            settled = true;
+            clearTimeout(expiry);
+          }
         }
 
         const after = await probe(deps, marker).catch(() => ({ url: '', present: false }));
@@ -326,18 +323,20 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         if (outcome.via === 'nothing-to-watch') {
           return `Asked, but there is no way to tell when it is finished: ` +
             `\`${gone ? 'untilTextGone' : 'untilTextAppears'}\` was already ` +
-            `${gone ? 'absent' : 'present'} before the user was asked, so it cannot mark the change — ` +
-            `and this client cannot report back when they are done.${moved}\n\n` +
-            `Tell the user plainly what is needed (${what}). Then either call this again with a marker ` +
+            `${gone ? 'absent' : 'present'} before the user was asked, so it cannot mark the change. ` +
+            `The user has been sent the request, but nothing reports back when they are done.${moved}\n\n` +
+            `Either call this again with a marker ` +
             `that is only true afterwards, or take a snapshot and check for yourself.`;
         }
 
         if (outcome.via === 'timeout') {
-          return `Waited ${seconds}s and the page has not changed — it looks like this has not been done yet.` +
-            `${moved}\n\nDo not retry the step yourself. Tell the user plainly what is still needed ` +
-            `(${what}), and call this again if they say they are ready.`;
+          return `Waited ${seconds}s and detected no change on the page — it has probably not been done yet, ` +
+            `though a change this cannot see (inside an iframe, or with no marker given) is possible.` +
+            `${moved}\n\nDo not retry the step yourself. Take a snapshot to check, tell the user plainly ` +
+            `what is still needed (${what}), and call this again — with \`untilTextGone\` or ` +
+            `\`untilTextAppears\` if you can name what will change — if they say they are ready.`;
         }
-        return `The user has done it${outcome.via === 'page-changed' ? ' — the page changed while waiting' : ''}.` +
+        return `The user has done it — the page changed while waiting.` +
           `${moved}\n\nTake a fresh snapshot before acting: the page is not where you left it.`;
       },
     },

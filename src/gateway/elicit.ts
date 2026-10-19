@@ -1,16 +1,14 @@
 /**
  * Reaching the person, through the client they are already using.
  *
- * Two directions, and they are kept apart because their fallbacks are
- * opposites. "May I save this?" that cannot be shown defaults to yes — the
- * client has already asked about the call itself, and turning ordinary work
- * into a silent refusal because a prompt was unavailable helps nobody. "Please
- * solve this CAPTCHA" that cannot be shown must default to *not* done; the
- * watcher on the page is what releases it, and answering yes for a user who was
- * never asked steps straight past the thing they have not solved.
+ * Two directions, kept apart because they reach the person differently. "May I
+ * save this?" goes through the client's prompt and defaults to yes when it
+ * cannot be shown — the client has already asked about the call itself. "Please
+ * solve this CAPTCHA" never goes through the client: it is sent out of band, and
+ * the watcher on the page is what releases it.
  *
  * The client arrives after these functions do. The tool list is built at module
- * load and closes over `requestUserAction`, while the Server that can actually
+ * load and closes over `confirmWithUser`, while the Server that can actually
  * elicit is constructed a few lines later with instructions that have to be
  * awaited first. Rather than reorder that around a detail, `attachClient` is
  * called once the server exists; every caller here runs during a tool call,
@@ -19,7 +17,8 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
 import { trace } from './context.ts';
-import { notifyOutOfBand } from './notify.ts';
+import { notifyOutOfBand, scrub } from './notify.ts';
+import type { NotifyResult } from './notify.ts';
 
 let client: Server | undefined;
 
@@ -35,76 +34,26 @@ export const clientCapabilities = (): Record<string, unknown> =>
 const canAsk = (): boolean => Boolean(client?.getClientCapabilities()?.elicitation);
 
 /**
- * Not "may I", but "please do this, and tell me when" — a CAPTCHA, a sign-in, a
- * card number. False means it was not done, including when it could not be asked.
+ * Not "may I", but "please do this" — a CAPTCHA, a sign-in, a card number.
  *
- * `mediaPath` is the page as the user would have seen it. For a CAPTCHA it saves
- * them opening the desk at all; for a code that expires — a bank's scan-to-log-in
- * QR is good for forty-five seconds — it is the difference between the ask being
- * useful and being a description of something already gone. It rides the
- * out-of-band message because that is the copy that reaches a phone.
+ * Always out of band, never through the client's elicitation prompt. Capability
+ * is not presence: Claude Code advertises elicitation in a phone Remote Control
+ * session and under `claude -p`, where no human ever sees the dialog, so 53 of
+ * 62 measured asks were raised into a window nobody was looking at. The page
+ * watcher in askUser is what notices the user act; this only has to tell them.
+ *
+ * The result is the delivery, not the answer. `ok: false` carries the reason so
+ * askUser can return it to the agent as a visible error instead of waiting out a
+ * timeout for a user who was never told.
+ *
+ * `mediaPath` is the page as the user would have seen it — for a code that
+ * expires in forty-five seconds it is the difference between a useful ask and a
+ * description of something already gone.
  */
 export async function requestUserAction(
-    title: string, message: string, mediaPath?: string): Promise<boolean> {
-  /*
-   * The out-of-band copy goes first, and goes regardless of what the client can
-   * do. Gating it on `canAsk()` was wrong in a way that only shows on a server:
-   * `claude -p` *does* advertise elicitation, so the prompt was dutifully raised
-   * into a session with no human attached, answered by nobody, and the user was
-   * never told anything. Capability is not presence.
-   *
-   * `BROWSER_ASK_TARGET` is therefore the switch, not the client's capability
-   * flags. Unset — the laptop — this is a no-op and the behaviour below is
-   * exactly what it always was. Set, it means "there is a chat channel where
-   * this user actually is", and a message there is never the wrong move.
-   */
-  const toldOutOfBand =
-    await notifyOutOfBand(title, message, mediaPath ? { mediaPath } : {}).catch(() => false);
-
-  /*
-   * Once the message has actually reached the chat channel, the client prompt is
-   * not a second chance — it is a trap. `claude -p` advertises elicitation while
-   * no human is attached to it, so `elicitInput` below is raised into a session
-   * nobody is looking at and never resolves; the whole tool then sits out its
-   * timeout with the user's own screenshot already on their phone, waiting for a
-   * tick they cannot possibly give. Worse, the run is blocked meanwhile, so
-   * every message they send in the chat aborts it instead of arriving.
-   *
-   * Delivery out of band therefore ends the asking. False is the honest answer —
-   * nothing here is evidence the step was done — and it hands the decision to
-   * askUser's page watcher, which is the only thing that can actually see the
-   * user act.
-   */
-  if (toldOutOfBand)
-    return false;
-
-  /*
-   * Still false when nobody can be prompted: nothing here is evidence the thing
-   * was done. False keeps askUser's page watcher running, which is the part
-   * that notices the challenge clearing without the user replying to anything.
-   */
-  if (!client || !canAsk())
-    return false;
-  try {
-    const answer = await client.elicitInput({
-      mode: 'form',
-      message: `${title}\n\n${message}`,
-      requestedSchema: {
-        type: 'object',
-        properties: {
-          done: {
-            type: 'boolean',
-            title: 'Done?',
-            description: 'Tick once you have done it in the browser. You can also just do it and ignore this.',
-          },
-        },
-        required: ['done'],
-      },
-    });
-    return answer.action === 'accept' && answer.content?.['done'] === true;
-  } catch {
-    return false;
-  }
+    title: string, message: string, mediaPath?: string): Promise<NotifyResult> {
+  return notifyOutOfBand(title, message, mediaPath ? { mediaPath } : {})
+      .catch((error: unknown) => ({ ok: false as const, reason: `notifier crashed: ${scrub(String(error))}` }));
 }
 
 /**
