@@ -1,0 +1,12 @@
+/**
+ * Real error bodies, captured from a live browser by driving a page built to
+ * fail in each of these ways. Verbatim because the wording is the contract: a
+ * diagnosis keyed on a message the browser does not actually send would pass
+ * its own test and never fire once in production.
+ */
+export const FAILURES = {
+  "notVisible": "### Error\nTimeoutError: browserBackend.callTool: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('role=radio')\n    - locator resolved to <input id=\"r\" name=\"k\" type=\"radio\" class=\"hidden\"/>\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n      - waiting 100ms\n    9 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n      - waiting 500ms\n",
+  "intercepted": "### Error\nTimeoutError: browserBackend.callTool: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('role=button[name=\"Continue\"]')\n    - locator resolved to <button id=\"b\">Continue</button>\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <div class=\"cover\"></div> intercepts pointer events\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <div class=\"cover\"></div> intercepts pointer events\n    - retrying click action\n      - waiting 100ms\n    9 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <div class=\"cover\"></div> intercepts pointer events\n    - retrying click action\n      - waiting 500ms\n    - waiting for element to be visible, enabled and stable\n",
+  "staleRef": "### Error\nError: Ref f99e999 not found in the current page snapshot. Try capturing new snapshot.",
+  "noMatch": "### Error\nError: \"role=button[name=\"Nonexistent\"]\" does not match any elements."
+};

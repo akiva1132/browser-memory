@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    // On because they were off. Two refactors — twenty-five files into six
+    // modules, then a detector deleted — left 33 dead declarations behind, and
+    // every one of them was something tsc could already see: a `rotate` import
+    // in the recorder that no longer rotates anything, a `withNote` import
+    // beside the one call site the extraction missed. Deleting them without
+    // this is fixing the symptom; the residue accumulated because nothing was
+    // looking.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    // exactOptionalPropertyTypes is deliberately off: the MCP SDK's own types
+    // declare optional properties without `| undefined`, so enabling it rejects
+    // the SDK's transports rather than finding anything wrong in this code.
+
+    // Node runs these files directly via native type stripping, so nothing is
+    // emitted and imports keep their .ts extensions. tsc is the type checker
+    // here, not the build step — which keeps src the only source of truth.
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "eval/**/*.ts"]
+}

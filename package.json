@@ -1,0 +1,37 @@
+{
+  "name": "browser-memory",
+  "version": "1.0.0",
+  "description": "Single MCP gateway: proxies Playwright MCP and adds per-domain agent memory",
+  "scripts": {
+    "start": "node src/gateway/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "npm run typecheck && node scripts/runTests.ts test/unit",
+    "test:browser": "node scripts/browserLock.ts npm run test:browser:unlocked",
+    "test:browser:unlocked": "node scripts/doctor.ts --quiet && node scripts/runTests.ts test/browser",
+    "doctor": "node scripts/doctor.ts",
+    "watch": "node scripts/watch.ts",
+    "explain": "node scripts/explain.ts",
+    "dossier": "node scripts/analysis/dossier.ts",
+    "harvest": "node scripts/browserLock.ts node scripts/harvest.ts",
+    "seed": "node scripts/seed.ts",
+    "eval": "node scripts/browserLock.ts node eval/run.ts",
+    "eval:compare": "node scripts/browserLock.ts node eval/run.ts --compare"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "private": true,
+  "bin": {
+    "browser-gateway": "src/gateway/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  }
+}

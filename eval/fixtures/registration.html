@@ -1,0 +1,64 @@
+<!doctype html><meta charset=utf-8><title>Conference registration</title>
+<style>
+ body{font:15px system-ui;max-width:640px;margin:40px auto;padding:0 16px}
+ .hidden-input{position:absolute;opacity:0;width:0;height:0}
+ label.opt{display:block;border:1px solid #ccc;border-radius:6px;padding:10px;margin:6px 0;cursor:pointer}
+ #consent{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+ #consent div{background:#fff;padding:24px;border-radius:8px}
+ .step{display:none} .step.on{display:block}
+</style>
+<div id=consent><div>
+  <p>We use cookies on this site.</p>
+  <button id=accept>Accept all</button>
+</div></div>
+
+<h1>Conference registration</h1>
+
+<section class="step on" id=step1>
+  <h2>Ticket type</h2>
+  <!-- The real inputs are visually hidden and take clicks through their label:
+       the exact shape that cost four five-second timeouts in the audit log. -->
+  <label class=opt for=t-free>Free — community track</label>
+  <input class=hidden-input type=radio name=ticket id=t-free value=free>
+  <label class=opt for=t-paid>Paid — full conference</label>
+  <input class=hidden-input type=radio name=ticket id=t-paid value=paid>
+  <button id=to2>Continue</button>
+  <p id=err1 style="color:#b00"></p>
+</section>
+
+<section class=step id=step2>
+  <h2>Your details</h2>
+  <p><label>Full name <input id=name></label></p>
+  <p><label>Email <input id=email></label></p>
+  <button id=submit>Complete registration</button>
+  <p id=err2 style="color:#b00"></p>
+</section>
+
+<section class=step id=step3>
+  <h2>You are registered</h2>
+  <p>Confirmation code: <strong id=code></strong></p>
+  <p id=tier></p>
+</section>
+
+<script>
+ const $ = s => document.querySelector(s);
+ $('#accept').onclick = () => $('#consent').remove();
+ $('#to2').onclick = () => {
+   const picked = document.querySelector('input[name=ticket]:checked');
+   // Inline, not alert(): a native dialog blocks the page rather than telling
+   // the agent anything, which is a hang and not the obstacle being measured.
+   if (!picked) { $('#err1').textContent = 'Choose a ticket type first.'; return; }
+   $('#err1').textContent = '';
+   $('#step1').classList.remove('on'); $('#step2').classList.add('on');
+   $('#step2').dataset.tier = picked.value;
+ };
+ $('#submit').onclick = () => {
+   if (!$('#name').value || !$('#email').value) {
+     $('#err2').textContent = 'Both fields are required.'; return;
+   }
+   const tier = $('#step2').dataset.tier;
+   $('#code').textContent = tier === 'paid' ? 'PAID-7734-QX' : 'FREE-1180-AB';
+   $('#tier').textContent = 'Ticket: ' + tier;
+   $('#step2').classList.remove('on'); $('#step3').classList.add('on');
+ };
+</script>

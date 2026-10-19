@@ -1,0 +1,5 @@
+node_modules/
+/memory/
+eval/results/
+eval/dossiers/
+*.bak-*
