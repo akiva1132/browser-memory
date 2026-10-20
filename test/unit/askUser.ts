@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 
 import { askUserTools } from '../../src/browser/askUser.ts';
 import type { AskDelivery, AskDeps, ToolResult } from '../../src/browser/askUser.ts';
+import type { HandoffView, HqHandoffs } from '../../src/gateway/hq.ts';
 
 type Fake = {
   deps: AskDeps;
@@ -212,5 +213,88 @@ const polls = (f: Fake) => f.calls.filter(call => call.name === 'browser_evaluat
 await assert.rejects(
     () => tool(fake()).handle({ need: 'other', what: '  ' }),
     /must say what the user should do/);
+
+// ── the company hq: a phone link to our own tab, and "done" that comes straight back ──
+type FakeHq = HqHandoffs & { created: Record<string, unknown>[]; ended: string[]; finish(state: HandoffView['state']): void };
+function fakeHq(options: { busyFrom?: string } = {}): FakeHq {
+  const view: HandoffView = {
+    id: 'h-1', state: 'live', domain: 'site.example', from: options.busyFrom ?? 'amit', expires_at: Date.now() + 600_000,
+    final_url: null, ended_by: null,
+  };
+  const waiters: (() => void)[] = [];
+  const hq: FakeHq = {
+    identity: 'amit', created: [], ended: [],
+    finish(state) { view.state = state; view.ended_by = 'phone'; waiters.splice(0).forEach(w => w()); },
+    async create(req) {
+      hq.created.push(req);
+      if (options.busyFrom)
+        return { ok: false, busy: { ...view }, reason: 'busy' };
+      return { ok: true, link: 'https://tab.example/h/abc', handoff: { ...view } };
+    },
+    async wait(_id, ms) {
+      if (view.state === 'live')
+        await new Promise<void>(resolve => { waiters.push(resolve); setTimeout(resolve, ms); });
+      return { ...view };
+    },
+    async end(id) { hq.ended.push(id); view.state = 'done'; waiters.splice(0).forEach(w => w()); },
+  };
+  return hq;
+}
+
+{
+  const f = fake();
+  const hq = fakeHq();
+  const sentWith: (string | undefined)[] = [];
+  f.deps.handoffs = hq;
+  f.deps.ownTarget = () => 'TARGET-1';
+  f.deps.ask = async (_title, message, _media, link) => { sentWith.push(link, message); return { ok: true }; };
+  setTimeout(() => hq.finish('done'), 1200);
+  const started = Date.now();
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 });
+  assert.match(result, /pressed "done"/);
+  assert.ok(Date.now() - started < 5000, '"done" on the phone wakes it at once, not at the timeout');
+  assert.equal(hq.created[0]!['target'], 'TARGET-1', 'the handoff is this session\'s own tab');
+  assert.equal(hq.created[0]!['url'], 'https://site.example/login');
+  assert.equal(sentWith[0], 'https://tab.example/h/abc');
+  assert.match(String(sentWith[1]), /tab\.example\/h\/abc/, 'the link is in the message');
+  console.log('  a phone handoff: link in the message, "done" returns at once');
+}
+
+{
+  const f = fake();
+  const hq = fakeHq();
+  f.deps.handoffs = hq;
+  setTimeout(() => { f.page.text = 'Welcome back'; }, 1600);
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', untilTextGone: 'Verify you are human', timeoutSeconds: 30 });
+  assert.match(result, /page changed while waiting/);
+  assert.deepEqual(hq.ended, ['h-1'], 'the page saw it first: the handoff is closed so the phone says thanks');
+  console.log('  the page watcher seeing it done closes the handoff');
+}
+
+{
+  const f = fake();
+  const hq = fakeHq();
+  f.deps.handoffs = hq;
+  f.deps.ask = async () => ({ ok: false, reason: 'telegram down' });
+  setTimeout(() => hq.finish('done'), 800);
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 });
+  assert.match(result, /pressed "done"/, 'with a handoff the link already reached the app: a failed chat message is not fatal');
+  assert.match(result, /telegram down/);
+  console.log('  a failed chat message is a note, not a dead end, when hq has the link');
+}
+
+{
+  const f = fake();
+  const hq = fakeHq({ busyFrom: 'eli' });
+  let asked = 0;
+  f.deps.handoffs = hq;
+  f.deps.ask = async () => { asked++; return { ok: true }; };
+  setTimeout(() => hq.finish('done'), 800);
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 });
+  assert.equal(asked, 0, 'a second sign-in to the same site would send a second code');
+  assert.match(result, /Another worker \(eli\)/);
+  assert.match(result, /probably signed in/);
+  console.log('  another worker signing in to the same site: wait for theirs, do not ask');
+}
 
 console.log('ASK USER OK');

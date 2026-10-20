@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 import { z } from 'zod';
 
 import type { LocalTool } from '../types.ts';
+import type { HandoffCreated, HandoffView, HqHandoffs } from '../gateway/hq.ts';
 import { bodyOf } from '../lib/toolResult.ts';
 import type { ToolResult } from '../lib/toolResult.ts';
 export type { ToolResult };
@@ -47,7 +48,16 @@ export type AskDeps = {
    * only the page watcher below can see them act. A failed delivery carries a
    * reason, which is returned to the agent rather than swallowed.
    */
-  ask: (title: string, message: string, mediaPath?: string) => Promise<AskDelivery>;
+  ask: (title: string, message: string, mediaPath?: string, link?: string) => Promise<AskDelivery>;
+  /**
+   * hq's tab handoff (agent-company B.9), when this runs on a machine that has
+   * one: a one-time link that puts this session's own tab on the user's phone,
+   * and a "done" button that comes straight back here. Absent, the ask is the
+   * message alone and the page watcher is the only way to see them act.
+   */
+  handoffs?: HqHandoffs;
+  /** This session's own tab (its CDP target id), so the handoff shows that tab and no other. */
+  ownTarget?: () => string | undefined;
 };
 
 export type AskDelivery = { ok: true } | { ok: false; reason: string };
@@ -169,6 +179,27 @@ function stageForSending(shot: string): string {
   }
 }
 
+/**
+ * Another worker is signing the user in to this site right now. Asking as well
+ * would race it — two codes, one void — and the browser profile is shared, so
+ * when theirs finishes this session is usually signed in too.
+ */
+async function waitForOthersLogin(handoffs: HqHandoffs, busy: HandoffView, seconds: number): Promise<string> {
+  const deadline = Date.now() + seconds * 1000;
+  let view: HandoffView | undefined = busy;
+  while (view?.state === 'live' && Date.now() < deadline)
+    view = await handoffs.wait(busy.id, Math.min(25_000, deadline - Date.now())).catch(() => undefined) ?? view;
+  const who = busy.from ?? 'another session';
+  if (view?.state === 'live') {
+    return `Another worker (${who}) is already having the user sign in to ${busy.domain}, and that is still ` +
+      `going after ${seconds}s. Asking as well would send a second code and void the first. Wait, then ` +
+      `take a fresh snapshot — the browser profile is shared, so their sign-in is yours too.`;
+  }
+  return `Another worker (${who}) was already having the user sign in to ${busy.domain}; that has now ` +
+    `ended (${view?.state ?? 'unknown'}). The browser profile is shared, so reload and take a fresh snapshot: ` +
+    `you are probably signed in. Only if you are not, call this again.`;
+}
+
 export function askUserTools(deps: AskDeps): LocalTool[] {
   return [
     {
@@ -184,7 +215,8 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         `- ${NEEDS['form-field']} — a plausible guess in a real form is worse than a question\n` +
         `- ${NEEDS.consent}\n\n` +
         'This brings your tab to the front, sends the user a message on their phone with a screenshot ' +
-        'of the page, and then waits. It returns as soon as the page shows they are done — they do ' +
+        'of the page — and, on the company server, a one-time link that shows them just your tab — and then ' +
+        'waits. It returns as soon as the page shows they are done or they press "done" on the phone — they do ' +
         'not have to come back and tell you. If the message cannot be sent, it fails at once and says ' +
         'why; then tell the user yourself, in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
         'name what will change, and it will notice within a second or two instead of waiting for a URL ' +
@@ -227,33 +259,60 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         // would return instantly and look like the user acted in zero seconds.
         const alreadySatisfied = (gone && !before.present) || (appears && before.present);
 
+        /*
+         * The handoff first, because its link goes into the message. Another
+         * worker already signing in to the same site holds hq's login lock: two
+         * sign-ins at once would send two SMS codes and the first would be
+         * void. The profile is shared, so the right move is to wait for theirs.
+         */
+        const handoff = deps.handoffs
+          ? await deps.handoffs.create({ target: deps.ownTarget?.(), url: before.url || undefined, what, need })
+              .catch((error: unknown): HandoffCreated => ({ ok: false, reason: String(error) }))
+          : undefined;
+        const busy = handoff && !handoff.ok ? handoff.busy : undefined;
+        if (busy && busy.from !== deps.handoffs!.identity)
+          return waitForOthersLogin(deps.handoffs!, busy, seconds);
+        // Our own live link for this site is already on their phone: wait on it, do not send another.
+        const handoffId = handoff?.ok ? handoff.handoff.id : busy?.id;
+        const link = handoff?.ok ? handoff.link : undefined;
+
         const message =
           `${what}\n\n` +
           `${why ? `${why}\n\n` : ''}` +
-          `This is ${NEEDS[need] ?? NEEDS.other}. Your browser tab has been brought to the front — ` +
-          `do it there and I will carry on by myself. You do not need to reply here.`;
+          (link
+            ? `This is ${NEEDS[need] ?? NEEDS.other}. Open this on your phone — it shows only that page, at ` +
+              `phone size, with your keyboard (one device, 10 minutes): ${link}\nPress "סיימתי" when done; ` +
+              `I carry on by myself.`
+            : `This is ${NEEDS[need] ?? NEEDS.other}. Your browser tab has been brought to the front — ` +
+              `do it there and I will carry on by myself. You do not need to reply here.`);
 
         /*
          * Taken here rather than earlier: after the tab is raised, so it is the
          * page being asked about, and as late as possible, because anything with
          * a countdown on it is worth least the moment after it is captured.
          */
-        const shot = await pageShot(deps);
+        const shot = busy ? undefined : await pageShot(deps);
 
         /*
          * Sent before anything waits. A delivery that failed is the one outcome
          * that must never turn into a silent timeout: nobody was told, so there
          * is nothing to wait for. Thrown, it reaches the agent as an error
-         * result with the reason in it.
+         * result with the reason in it. With a handoff, hq has already put the
+         * link in the user's "waiting for you" list and pushed it, so a failed
+         * message is a note rather than a dead end.
          */
-        const delivery: AskDelivery = await deps.ask(`Your turn: ${what.slice(0, 80)}`, message, shot)
-            .catch((error: unknown) => ({ ok: false as const, reason: String(error) }));
-        if (!delivery.ok) {
+        const delivery: AskDelivery = busy
+          ? { ok: true }
+          : await deps.ask(`Your turn: ${what.slice(0, 80)}`, message, shot, link)
+              .catch((error: unknown) => ({ ok: false as const, reason: String(error) }));
+        if (!delivery.ok && !handoffId) {
           throw new Error(
               `the user was NOT notified — ${delivery.reason}. Nobody knows this step is waiting. ` +
               `Do not wait for it and do not retry the step yourself: tell the user directly, in your ` +
               `reply, what is needed (${what}), and report the notification failure.`);
         }
+        const deliveryNote = delivery.ok ? '' :
+          `\n(The chat message failed — ${delivery.reason} — but the link reached the user's company app.)`;
 
         /*
          * Held in an object rather than a bare `let`, so the compiler keeps the
@@ -261,7 +320,8 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
          * narrows to its initial value and every later comparison reads as
          * unreachable.
          */
-        const outcome: { via: 'page-changed' | 'timeout' | 'nothing-to-watch' } = { via: 'timeout' };
+        const outcome: { via: 'page-changed' | 'timeout' | 'nothing-to-watch' | 'handoff-ended'; ended?: HandoffView } =
+          { via: 'timeout' };
         const deadline = Date.now() + seconds * 1000;
         /**
          * Stops the watcher the moment the wait is over. Without it the watcher
@@ -271,7 +331,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
          */
         let settled = false;
 
-        if (alreadySatisfied) {
+        if (alreadySatisfied && !handoffId) {
           /*
            * The marker was already true before anyone was asked, so it cannot
            * mark the change, and no reply is coming back through this channel.
@@ -281,6 +341,9 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
           outcome.via = 'nothing-to-watch';
         } else {
           const watched = (async (): Promise<void> => {
+            // A marker that was already true cannot mark the change; then only the handoff can.
+            if (alreadySatisfied)
+              return new Promise<void>(() => {});
             while (!settled && Date.now() < deadline) {
               await new Promise(resolve => setTimeout(resolve, POLL_MS));
               if (settled)
@@ -301,10 +364,37 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
             }
           })();
 
+          /*
+           * "סיימתי" on the phone (or in the app) ends the handoff in hq, and
+           * this long-poll returns with it — the wake-up does not depend on the
+           * page showing anything.
+           */
+          const handedOver = (async (): Promise<void> => {
+            if (!handoffId || !deps.handoffs)
+              return new Promise<void>(() => {});
+            while (!settled && Date.now() < deadline) {
+              const view = await deps.handoffs.wait(handoffId, Math.min(25_000, deadline - Date.now()))
+                  .catch(() => undefined);
+              if (settled)
+                return;
+              if (!view) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+              }
+              if (view.state !== 'live') {
+                settled = true;
+                outcome.via = 'handoff-ended';
+                outcome.ended = view;
+                return;
+              }
+            }
+          })();
+
           let expiry: ReturnType<typeof setTimeout> | undefined;
           try {
             await Promise.race([
               watched,
+              handedOver,
               new Promise(resolve => { expiry = setTimeout(resolve, seconds * 1000); }),
             ]);
           } finally {
@@ -314,7 +404,25 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         }
 
         const after = await probe(deps, marker).catch(() => ({ url: '', present: false }));
-        const moved = after.url && after.url !== before.url ? `\nThe page is now ${after.url}.` : '';
+        const moved = (after.url && after.url !== before.url ? `\nThe page is now ${after.url}.` : '') + deliveryNote;
+
+        // The page shows it is done: close the handoff, so the phone says "thanks" and the link is spent.
+        if (outcome.via === 'page-changed' && handoffId)
+          await deps.handoffs?.end(handoffId, after.url || undefined).catch(() => {});
+
+        if (outcome.via === 'handoff-ended') {
+          const ended = outcome.ended!;
+          if (ended.state === 'done') {
+            return `The user has done it — they finished on their phone and pressed "done".${moved}\n\n` +
+              `Take a fresh snapshot before acting: the page is not where you left it.`;
+          }
+          const why = ended.state === 'expired' ? 'the link expired before they got to it'
+            : ended.state === 'closed' ? 'your tab was closed'
+            : 'they declined it for now';
+          return `The handoff ended without the step being done: ${why}.${moved}\n\n` +
+            `Do not retry the step yourself. Tell the user plainly what is still needed (${what}), and ` +
+            `call this again if they say they are ready.`;
+        }
 
         // Reported as unfinished, not as done: the marker was true before the
         // user was asked anything, so it never described the state being waited
@@ -330,9 +438,13 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         }
 
         if (outcome.via === 'timeout') {
+          const stillLive = handoffId
+            ? `\n\nThe phone link stays valid for its 10 minutes. If they finish after this, you will get a ` +
+              `message from the owner saying so — you do not need to poll.`
+            : '';
           return `Waited ${seconds}s and detected no change on the page — it has probably not been done yet, ` +
             `though a change this cannot see (inside an iframe, or with no marker given) is possible.` +
-            `${moved}\n\nDo not retry the step yourself. Take a snapshot to check, tell the user plainly ` +
+            `${moved}${stillLive}\n\nDo not retry the step yourself. Take a snapshot to check, tell the user plainly ` +
             `what is still needed (${what}), and call this again — with \`untilTextGone\` or ` +
             `\`untilTextAppears\` if you can name what will change — if they say they are ready.`;
         }

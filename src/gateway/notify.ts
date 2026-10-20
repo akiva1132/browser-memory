@@ -26,6 +26,8 @@ const SEND_TIMEOUT_MS = 30_000;
 type NotifyOptions = {
   /** A local file to attach — the CAPTCHA itself is worth more than any description of it. */
   mediaPath?: string;
+  /** A handoff link is already in the message (hq, B.9): then the desk is not where to act. */
+  link?: string;
 };
 
 const env = (name: string): string => (process.env[name] ?? '').trim();
@@ -64,7 +66,7 @@ export async function notifyOutOfBand(
 
   const channel = env('BROWSER_ASK_CHANNEL') || 'telegram';
   const command = env('BROWSER_ASK_CMD') || 'openclaw';
-  const body = `${title}\n\n${message}${whereToAct()}`;
+  const body = `${title}\n\n${message}${options.link ? '' : whereToAct()}`;
 
   const args = ['message', 'send', '--channel', channel, '-t', target, '-m', body];
   if (options.mediaPath)

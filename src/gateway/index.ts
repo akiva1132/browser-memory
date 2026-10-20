@@ -28,6 +28,7 @@ import { explainFailure } from '../browser/diagnose.ts';
 import { collapseRepeat, snapshotFileOf, snapshotWithin, treeOf, urlOf } from '../browser/repeat.ts';
 import type { Remembered } from '../browser/repeat.ts';
 import { askUserTools } from '../browser/askUser.ts';
+import { hqHandoffs, hqSocket } from './hq.ts';
 import { credentialTools } from '../browser/credentials.ts';
 import { explainFindings, reviewProcedureCode } from '../procedures/codeReview.ts';
 import { redactCode } from '../lib/redact.ts';
@@ -36,7 +37,7 @@ import { bodyOf, failure, text, withNote } from '../lib/toolResult.ts';
 import type { ToolResult } from '../lib/toolResult.ts';
 import type { JsonSchema, LocalTool } from '../types.ts';
 import { ABLATABLE, WITHOUT, without, withheldTools } from './ablation.ts';
-import { apiMap, audit, observer, OUTPUT_DIR, places, procedures, store, trace, UPSTREAM } from './context.ts';
+import { apiMap, audit, observer, OUTPUT_DIR, places, procedures, store, tabs, trace, UPSTREAM } from './context.ts';
 import { attachClient, clientCapabilities, confirmWithUser, requestUserAction } from './elicit.ts';
 import {
   callUpstream, currentDomain, getUpstream, noteNavigation, releaseTab,
@@ -52,7 +53,8 @@ const tools: LocalTool[] = [
   // mid-login, and none of that belongs in the API map or the lesson store.
   ...askUserTools({
     call: (name, args) => callUpstream(name, args),
-    ask: (title, message, mediaPath) => requestUserAction(title, message, mediaPath),
+    ask: (title, message, mediaPath, link) => requestUserAction(title, message, mediaPath, link),
+    ...(hqSocket.enabled() ? { handoffs: hqHandoffs(), ownTarget: () => tabs.owned } : {}),
   }),
   // Same un-observed path, and for the same reason: these read and type into
   // login forms, and a password has no business in the API map or the lessons.

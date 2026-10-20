@@ -51,8 +51,8 @@ const canAsk = (): boolean => Boolean(client?.getClientCapabilities()?.elicitati
  * description of something already gone.
  */
 export async function requestUserAction(
-    title: string, message: string, mediaPath?: string): Promise<NotifyResult> {
-  return notifyOutOfBand(title, message, mediaPath ? { mediaPath } : {})
+    title: string, message: string, mediaPath?: string, link?: string): Promise<NotifyResult> {
+  return notifyOutOfBand(title, message, { ...(mediaPath ? { mediaPath } : {}), ...(link ? { link } : {}) })
       .catch((error: unknown) => ({ ok: false as const, reason: `notifier crashed: ${scrub(String(error))}` }));
 }
 

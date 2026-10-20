@@ -120,6 +120,8 @@ async function ensureOwnTab(opensItsOwn: boolean): Promise<string[] | undefined>
       claimAfter = before;
       return;
     }
+    if (await openOwnWindow())
+      return;
     await rawCall('browser_tabs', { action: 'new' });
     await noteClaim(await tabs.claim(before).catch(() => 'unenumerable' as const));
   })().catch(error => {
@@ -141,6 +143,41 @@ async function ensureOwnTab(opensItsOwn: boolean): Promise<string[] | undefined>
   });
   await ownTab;
   return claimAfter;
+}
+
+/**
+ * This session's tab in a window of its own, made current in the Playwright
+ * session. Playwright notices the new page on its own; finding it means
+ * matching the marker URL in the listing, which may take a moment to include
+ * it. Anything short of selecting it gives the target back and returns false,
+ * so the caller opens an ordinary tab the way it always did.
+ */
+async function openOwnWindow(): Promise<boolean> {
+  const marker = `browser-memory-${process.pid}-${Date.now().toString(36)}`;
+  const target = await tabs.openWindow(marker);
+  if (!target)
+    return false;
+  const list = async (): Promise<string[]> =>
+    bodyOf(await rawCall('browser_tabs', { action: 'list' })).split('\n');
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const line = (await list()).find(entry => entry.includes(marker));
+      const index = line ? Number(/(\d+)/.exec(line)?.[1]) : NaN;
+      if (Number.isFinite(index)) {
+        await rawCall('browser_tabs', { action: 'select', index });
+        // Indices shift when any tab closes; only a listing that marks ours current proves the select landed.
+        if ((await list()).some(entry => entry.includes(marker) && /current/i.test(entry))) {
+          await tabs.adopt(target);
+          return true;
+        }
+      }
+    } catch {
+      // The upstream restarting is ordinary; the attempts are the budget for it.
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  await tabs.discard(target);
+  return false;
 }
 
 /**

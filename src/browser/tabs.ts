@@ -161,6 +161,63 @@ export class TabRegistry {
     return 'claimed';
   }
 
+  /** The CDP target id of this session's own tab, once claimed. */
+  get owned(): string | undefined {
+    return this._owned;
+  }
+
+  /**
+   * A tab of our own in a window of its own (agent-company B.9: one window per
+   * agent). A tab sharing a window with other agents' tabs is in the background
+   * whenever one of theirs is in front, and Chrome stops painting background
+   * tabs — so when the user is handed this tab on their phone, the screencast
+   * would show nothing. Its own window keeps it the front tab of something.
+   *
+   * Opened over CDP at a unique marker URL, because that is the only way to
+   * find it again in the Playwright listing, which offers indices and URLs but
+   * no target ids. Returns the target id, or undefined when the browser could
+   * not be asked — the caller then opens a plain tab as before.
+   */
+  async openWindow(marker: string): Promise<string | undefined> {
+    const version = await cdp('/json/version').catch(() => undefined) as { webSocketDebuggerUrl?: string } | undefined;
+    const url = version?.webSocketDebuggerUrl;
+    if (!url)
+      return undefined;
+    const socket = new WebSocket(url);
+    try {
+      await new Promise((resolve, reject) => {
+        socket.addEventListener('open', resolve, { once: true });
+        socket.addEventListener('error', reject, { once: true });
+        setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS);
+      });
+      const reply = await new Promise<{ result?: { targetId?: string } }>((resolve, reject) => {
+        socket.addEventListener('message', event => resolve(JSON.parse(String(event.data))), { once: true });
+        socket.send(JSON.stringify({
+          id: 1, method: 'Target.createTarget', params: { url: `about:blank#${marker}`, newWindow: true },
+        }));
+        setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS);
+      });
+      return reply.result?.targetId;
+    } catch {
+      return undefined;
+    } finally {
+      socket.close();
+    }
+  }
+
+  /** Close a target we opened and could not use. */
+  async discard(target: string): Promise<void> {
+    await cdp(`/json/close/${target}`).catch(() => {});
+  }
+
+  /** Record a tab whose target id we already know (openWindow) as ours. */
+  async adopt(target: string): Promise<void> {
+    this._owned = target;
+    const entry: Owned = { target, pid: process.pid, session: this._session, at: new Date().toISOString() };
+    await this._mutate(async tabs => [[...tabs.filter(tab => tab.target !== target), entry], undefined])
+        .catch(() => {});
+  }
+
   /** Drop our claim once the tab has been handed back through the normal path. */
   async release(): Promise<void> {
     const target = this._owned;
