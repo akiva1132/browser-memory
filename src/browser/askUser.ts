@@ -439,8 +439,8 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
 
         if (outcome.via === 'timeout') {
           const stillLive = handoffId
-            ? `\n\nThe phone link stays valid for its 10 minutes. If they finish after this, you will get a ` +
-              `message from the owner saying so — you do not need to poll.`
+            ? `\n\nThe phone link stays valid for its 10 minutes. Whatever happens to it after this — done, ` +
+              `declined or expired — you will get a message saying so; you do not need to poll.`
             : '';
           return `Waited ${seconds}s and detected no change on the page — it has probably not been done yet, ` +
             `though a change this cannot see (inside an iframe, or with no marker given) is possible.` +
