@@ -56,7 +56,7 @@ export type AskDeps = {
    * message alone and the page watcher is the only way to see them act.
    */
   handoffs?: HqHandoffs;
-  /** This session's own tab (its CDP target id), so the handoff shows that tab and no other. */
+  /** This session's recorded tab (its CDP target id): the fallback when the current page cannot name its own target. */
   ownTarget?: () => string | undefined;
 };
 
@@ -112,6 +112,34 @@ async function bringOurTabToFront(deps: AskDeps): Promise<void> {
   } catch {
     // Being unable to raise the tab is worth continuing past: the user can
     // still switch to it themselves, and the request is about to be shown.
+  }
+}
+
+/**
+ * The CDP target of the page this session is driving right now — the one the
+ * probe read and the screenshot shows — so the phone gets that tab.
+ *
+ * `ownTarget` alone is not it. That is the window opened at the start of the
+ * session, and Playwright's current page drifts away from it: a `browser_tabs
+ * new` or `select`, or the upstream resetting its current page, and the agent
+ * works in another tab while the recorded one stays on its blank marker. Handed
+ * that, the phone showed a white page titled "blank" three times running
+ * (26/10, Mercury), while the screenshot in the same message showed the login.
+ *
+ * Asked through the page itself, because the tab listing offers indices and
+ * URLs but no target ids. Undefined when the browser cannot say; the caller
+ * then falls back to the recorded tab.
+ */
+async function currentTarget(deps: AskDeps): Promise<string | undefined> {
+  try {
+    const body = bodyOf(await deps.call('browser_run_code_unsafe', {
+      code: 'async (page) => { const s = await page.context().newCDPSession(page); ' +
+        'try { const r = await s.send("Target.getTargetInfo"); return "target:" + r.targetInfo.targetId; } ' +
+        'finally { await s.detach().catch(() => {}); } }',
+    }));
+    return /target:([0-9A-Fa-f]{16,})/.exec(body)?.[1];
+  } catch {
+    return undefined;
   }
 }
 
@@ -221,6 +249,9 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         'why; then tell the user yourself, in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
         'name what will change, and it will notice within a second or two instead of waiting for a URL ' +
         'change.\n\n' +
+        'If this call is interrupted (a message arrived while it waited), the request is NOT cancelled: the ' +
+        'phone link stays live, and when the user finishes, declines or it expires you get a message saying ' +
+        'so. Do not call it again for the same step; answer the message and wait for that one.\n\n' +
         'Say what you need in plain language, as if to someone who cannot see your reasoning.',
       schema: {
         need: z.enum(['captcha', 'login', 'payment', 'form-field', 'consent', 'other'])
@@ -238,7 +269,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
             `How long to wait. Default ${DEFAULT_TIMEOUT_S}, maximum ${MAX_TIMEOUT_S}. On timeout this ` +
             'returns without failing, so you can report where things stand and ask again.'),
       },
-      handle: async args => {
+      handle: async (args, signal) => {
         const need = String(args['need'] ?? 'other') as keyof typeof NEEDS;
         const what = String(args['what'] ?? '').trim();
         const why = String(args['why'] ?? '').trim();
@@ -266,7 +297,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
          * void. The profile is shared, so the right move is to wait for theirs.
          */
         const handoff = deps.handoffs
-          ? await deps.handoffs.create({ target: deps.ownTarget?.(), url: before.url || undefined, what, need })
+          ? await deps.handoffs.create({ target: (await currentTarget(deps)) ?? deps.ownTarget?.(), url: before.url || undefined, what, need })
               .catch((error: unknown): HandoffCreated => ({ ok: false, reason: String(error) }))
           : undefined;
         const busy = handoff && !handoff.ok ? handoff.busy : undefined;
@@ -320,7 +351,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
          * narrows to its initial value and every later comparison reads as
          * unreachable.
          */
-        const outcome: { via: 'page-changed' | 'timeout' | 'nothing-to-watch' | 'handoff-ended'; ended?: HandoffView } =
+        const outcome: { via: 'page-changed' | 'timeout' | 'nothing-to-watch' | 'handoff-ended' | 'cancelled'; ended?: HandoffView } =
           { via: 'timeout' };
         const deadline = Date.now() + seconds * 1000;
         /**
@@ -373,7 +404,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
             if (!handoffId || !deps.handoffs)
               return new Promise<void>(() => {});
             while (!settled && Date.now() < deadline) {
-              const view = await deps.handoffs.wait(handoffId, Math.min(25_000, deadline - Date.now()))
+              const view = await deps.handoffs.wait(handoffId, Math.min(25_000, deadline - Date.now()), signal)
                   .catch(() => undefined);
               if (settled)
                 return;
@@ -390,9 +421,28 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
             }
           })();
 
+          /*
+           * The client gave up on this call: Claude Code cancels a running tool
+           * when a message for the agent arrives. Nobody will read what this
+           * returns, so stop watching and let go of hq's long-poll — with no
+           * waiter left, hq sends the ending (done, declined, expired) to the
+           * worker's mailbox, which is what the tool description promises.
+           */
+          let onAbort: (() => void) | undefined;
+          const cancelled = new Promise<void>(resolve => {
+            if (!signal)
+              return;
+            onAbort = () => { outcome.via = 'cancelled'; resolve(); };
+            if (signal.aborted)
+              onAbort();
+            else
+              signal.addEventListener('abort', onAbort, { once: true });
+          });
+
           let expiry: ReturnType<typeof setTimeout> | undefined;
           try {
             await Promise.race([
+              cancelled,
               watched,
               handedOver,
               new Promise(resolve => { expiry = setTimeout(resolve, seconds * 1000); }),
@@ -400,7 +450,14 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
           } finally {
             settled = true;
             clearTimeout(expiry);
+            if (onAbort)
+              signal?.removeEventListener('abort', onAbort);
           }
+        }
+
+        if (outcome.via === 'cancelled') {
+          return `Cancelled by the client before it finished. The request is still with the user` +
+            `${handoffId ? '; its ending will arrive as a message' : ''}.`;
         }
 
         const after = await probe(deps, marker).catch(() => ({ url: '', present: false }));

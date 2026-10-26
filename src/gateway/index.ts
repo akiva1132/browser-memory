@@ -242,7 +242,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   }
 });
 
-server.setRequestHandler(CallToolRequestSchema, async request => {
+server.setRequestHandler(CallToolRequestSchema, async (request, { signal }) => {
   const { name, arguments: rawArgs } = request.params;
   const args = (rawArgs ?? {}) as Record<string, unknown>;
   const started = Date.now();
@@ -302,7 +302,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
       }
     }
     try {
-      const reply = text(await local.handle(args));
+      const reply = text(await local.handle(args, signal));
       done('ok', undefined, bodyOf(reply).length);
       return reply;
     } catch (error) {

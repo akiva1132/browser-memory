@@ -193,5 +193,6 @@ export type LocalTool = {
   title: string;
   description: string;
   schema: Record<string, z.ZodTypeAny>;
-  handle: (args: Record<string, unknown>) => Promise<string>;
+  /** `signal` aborts when the client cancels the call (Claude Code does, when a message arrives mid-call). */
+  handle: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
 };

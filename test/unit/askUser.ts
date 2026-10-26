@@ -297,4 +297,60 @@ function fakeHq(options: { busyFrom?: string } = {}): FakeHq {
   console.log('  another worker signing in to the same site: wait for theirs, do not ask');
 }
 
+// ── the phone gets the page the agent is on, not the window it started in ───
+{
+  const f = fake();
+  const hq = fakeHq();
+  f.deps.handoffs = hq;
+  f.deps.ownTarget = () => 'BLANK-MARKER-WINDOW';
+  const call = f.deps.call;
+  f.deps.call = async (name, args) => name === 'browser_run_code_unsafe'
+    ? text('### Result\n"target:AABCEB92990533E781DD8FE378A30700"')
+    : call(name, args);
+  setTimeout(() => hq.finish('done'), 800);
+  await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 });
+  assert.equal(hq.created[0]!['target'], 'AABCEB92990533E781DD8FE378A30700',
+      'the current page, which is what the screenshot showed — not the recorded blank window');
+  console.log('  the handoff is the current page, even after the session moved tabs');
+}
+
+{
+  const f = fake();
+  const hq = fakeHq();
+  f.deps.handoffs = hq;
+  f.deps.ownTarget = () => 'TARGET-1';
+  const call = f.deps.call;
+  f.deps.call = async (name, args) => {
+    if (name === 'browser_run_code_unsafe')
+      throw new Error('upstream gone');
+    return call(name, args);
+  };
+  setTimeout(() => hq.finish('done'), 800);
+  await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 });
+  assert.equal(hq.created[0]!['target'], 'TARGET-1', 'a page that cannot name itself falls back to the recorded tab');
+  console.log('  falls back to the recorded tab when the page cannot say');
+}
+
+// ── a message for the agent cancels the call: stop, and leave the ending to hq's mail ─
+{
+  const f = fake();
+  const hq = fakeHq();
+  const signals: (AbortSignal | undefined)[] = [];
+  const wait = hq.wait.bind(hq);
+  hq.wait = async (id, ms, signal) => { signals.push(signal); return wait(id, ms); };
+  f.deps.handoffs = hq;
+  const client = new AbortController();
+  setTimeout(() => client.abort(), 600);
+  const started = Date.now();
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 30 }, client.signal);
+  assert.ok(Date.now() - started < 3000, 'a cancelled call stops waiting at once');
+  assert.match(result, /ending will arrive as a message/);
+  assert.equal(hq.ended.length, 0, 'cancelling the call is not the user finishing: the handoff stays live');
+  assert.ok(signals.length && signals.every(s => s === client.signal), 'the long-poll is let go, so hq mails the ending');
+  const pollsThen = polls(f);
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  assert.equal(polls(f), pollsThen, 'and the page is no longer watched');
+  console.log('  a cancelled call stops at once and leaves the handoff live for hq to report');
+}
+
 console.log('ASK USER OK');

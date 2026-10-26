@@ -38,7 +38,7 @@ export type HqHandoffs = {
   identity: string | null;
   create(req: { target?: string; url?: string; what: string; need: string }): Promise<HandoffCreated>;
   /** Resolves when it ends, or with its current state after `ms`. */
-  wait(id: string, ms: number): Promise<HandoffView | undefined>;
+  wait(id: string, ms: number, signal?: AbortSignal): Promise<HandoffView | undefined>;
   end(id: string, finalUrl?: string): Promise<void>;
 };
 
@@ -55,7 +55,7 @@ export function hqSocket(): string | undefined {
   return fs.existsSync(sock) ? sock : undefined;
 }
 
-function call(sock: string, method: string, pathname: string, body?: unknown, timeoutMs = 15_000):
+function call(sock: string, method: string, pathname: string, body?: unknown, timeoutMs = 15_000, signal?: AbortSignal):
     Promise<{ status: number; json: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? undefined : JSON.stringify(body);
@@ -76,6 +76,15 @@ function call(sock: string, method: string, pathname: string, body?: unknown, ti
     });
     req.on('timeout', () => req.destroy(new Error(`hq did not answer within ${timeoutMs / 1000}s`)));
     req.on('error', reject);
+    // Closing the request is what tells hq this waiter is gone, so the ending reaches the worker by mail instead.
+    if (signal) {
+      const gone = () => req.destroy(new Error('cancelled'));
+      if (signal.aborted)
+        gone();
+      else
+        signal.addEventListener('abort', gone, { once: true });
+      req.on('close', () => signal.removeEventListener('abort', gone));
+    }
     req.end(data);
   });
 }
@@ -105,8 +114,8 @@ export function hqHandoffs(): HqHandoffs {
         return { ok: false, busy: r.json['busy'] as HandoffView, reason };
       return { ok: false, reason };
     },
-    async wait(id, ms) {
-      const r = await call(socketOrThrow(), 'GET', `/v1/handoffs/${encodeURIComponent(id)}?wait=${Math.round(ms)}`, undefined, ms + 10_000);
+    async wait(id, ms, signal) {
+      const r = await call(socketOrThrow(), 'GET', `/v1/handoffs/${encodeURIComponent(id)}?wait=${Math.round(ms)}`, undefined, ms + 10_000, signal);
       return r.status === 200 ? r.json['handoff'] as HandoffView : undefined;
     },
     async end(id, finalUrl) {
