@@ -1,5 +1,20 @@
-node_modules/
+node_modules
+# Only the data directory at the root. A bare `memory/` also hid the code in src/memory/.
 /memory/
 eval/results/
 eval/dossiers/
+# Run output from real browsing (chained memory, discarded runs): data, never code.
+eval/chain-memory/
+eval/discarded/
 *.bak-*
+# Agents write with relative paths; keep what they leave behind out of git.
+/work/
+.playwright-mcp/
+.env*
+*credentials*.json
+*.har
+*.jsonl
+*.png
+*.jpg
+*.jpeg
+*.pdf
