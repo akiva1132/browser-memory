@@ -353,4 +353,22 @@ function fakeHq(options: { busyFrom?: string } = {}): FakeHq {
   console.log('  a cancelled call stops at once and leaves the handoff live for hq to report');
 }
 
+{
+  const f = fake();
+  const hq = fakeHq({ busyFrom: 'eli' });
+  const wait = hq.wait.bind(hq);
+  // Like the real client: a cancelled long-poll rejects at once.
+  hq.wait = (id, ms, signal) => new Promise((resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+    wait(id, ms).then(resolve, reject);
+  });
+  f.deps.handoffs = hq;
+  const client = new AbortController();
+  setTimeout(() => client.abort(), 500);
+  const started = Date.now();
+  await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 60 }, client.signal);
+  assert.ok(Date.now() - started < 3000, 'cancelled while waiting on another worker\'s sign-in, it lets go at once');
+  console.log('  a cancelled wait on another worker\'s sign-in lets go at once');
+}
+
 console.log('ASK USER OK');

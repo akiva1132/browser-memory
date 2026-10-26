@@ -212,11 +212,13 @@ function stageForSending(shot: string): string {
  * would race it — two codes, one void — and the browser profile is shared, so
  * when theirs finishes this session is usually signed in too.
  */
-async function waitForOthersLogin(handoffs: HqHandoffs, busy: HandoffView, seconds: number): Promise<string> {
+async function waitForOthersLogin(
+    handoffs: HqHandoffs, busy: HandoffView, seconds: number, signal?: AbortSignal): Promise<string> {
   const deadline = Date.now() + seconds * 1000;
   let view: HandoffView | undefined = busy;
-  while (view?.state === 'live' && Date.now() < deadline)
-    view = await handoffs.wait(busy.id, Math.min(25_000, deadline - Date.now())).catch(() => undefined) ?? view;
+  // Cancelled, this must not stay a waiter on the other worker's handoff: hq mails the ending only when none is left.
+  while (view?.state === 'live' && Date.now() < deadline && !signal?.aborted)
+    view = await handoffs.wait(busy.id, Math.min(25_000, deadline - Date.now()), signal).catch(() => undefined) ?? view;
   const who = busy.from ?? 'another session';
   if (view?.state === 'live') {
     return `Another worker (${who}) is already having the user sign in to ${busy.domain}, and that is still ` +
@@ -249,9 +251,13 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         'why; then tell the user yourself, in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
         'name what will change, and it will notice within a second or two instead of waiting for a URL ' +
         'change.\n\n' +
-        'If this call is interrupted (a message arrived while it waited), the request is NOT cancelled: the ' +
-        'phone link stays live, and when the user finishes, declines or it expires you get a message saying ' +
-        'so. Do not call it again for the same step; answer the message and wait for that one.\n\n' +
+        (deps.handoffs
+          ? 'If this call is interrupted (a message arrived while it waited) after a phone link went out, the ' +
+            'request is NOT cancelled: the link stays live, and when the user finishes, declines or it expires ' +
+            'you get a message saying so. Do not call it again for the same step; answer the message and wait ' +
+            'for that one. If no link went out, take a snapshot and ask again if it is still needed.\n\n'
+          : 'If this call is interrupted (a message arrived while it waited), nothing reports back afterwards: ' +
+            'take a snapshot, and ask again if the step is still not done.\n\n') +
         'Say what you need in plain language, as if to someone who cannot see your reasoning.',
       schema: {
         need: z.enum(['captcha', 'login', 'payment', 'form-field', 'consent', 'other'])
@@ -302,7 +308,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
           : undefined;
         const busy = handoff && !handoff.ok ? handoff.busy : undefined;
         if (busy && busy.from !== deps.handoffs!.identity)
-          return waitForOthersLogin(deps.handoffs!, busy, seconds);
+          return waitForOthersLogin(deps.handoffs!, busy, seconds, signal);
         // Our own live link for this site is already on their phone: wait on it, do not send another.
         const handoffId = handoff?.ok ? handoff.handoff.id : busy?.id;
         const link = handoff?.ok ? handoff.link : undefined;
@@ -427,6 +433,8 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
            * returns, so stop watching and let go of hq's long-poll — with no
            * waiter left, hq sends the ending (done, declined, expired) to the
            * worker's mailbox, which is what the tool description promises.
+           * The page is no longer watched, so a user who finishes on the page
+           * without pressing "סיימתי" reads as expired when the link runs out.
            */
           let onAbort: (() => void) | undefined;
           const cancelled = new Promise<void>(resolve => {
