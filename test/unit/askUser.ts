@@ -99,7 +99,7 @@ const polls = (f: Fake) => f.calls.filter(call => call.name === 'browser_evaluat
   const f = fake({ ask: async title => { titles.push(title); return { ok: true }; } });
   setTimeout(() => { f.page.url = 'https://site.example/done'; }, 1600);
   await tool(f).handle({ need: 'captcha', what: 'Tick the box', timeoutSeconds: 10 });
-  assert.deepEqual(titles, ['Your turn: Tick the box'], 'exactly one message per ask');
+  assert.deepEqual(titles, ['תורך: Tick the box'], 'exactly one message per ask, in Hebrew');
   console.log('  one message per ask');
 }
 
@@ -295,6 +295,55 @@ function fakeHq(options: { busyFrom?: string } = {}): FakeHq {
   assert.match(result, /Another worker \(eli\)/);
   assert.match(result, /probably signed in/);
   console.log('  another worker signing in to the same site: wait for theirs, do not ask');
+}
+
+// ── hq is here but refused the link: an error now, never a silent wait (31/10) ─
+{
+  const f = fake();
+  const hq = fakeHq();
+  let asked = 0;
+  hq.create = async req => { hq.created.push(req); return { ok: false, reason: 'tab T is blank (about:blank#browser-memory-1): select the tab with the page the user must act on, then ask again' }; };
+  f.deps.handoffs = hq;
+  f.deps.ask = async () => { asked++; return { ok: true }; };
+  const started = Date.now();
+  await assert.rejects(
+      () => tool(f).handle({ need: 'other', what: 'Look at the photo', timeoutSeconds: 120 }),
+      (error: Error) => {
+        assert.match(error.message, /NOT asked/);
+        assert.match(error.message, /is blank/, 'hq\'s reason reaches the agent');
+        assert.match(error.message, /Look at the photo/);
+        return true;
+      });
+  assert.ok(Date.now() - started < 3000, 'at once, not after the timeout');
+  assert.equal(asked, 0, 'no link-less chat message as if it were asked');
+  const at = polls(f);
+  await new Promise(resolve => setTimeout(resolve, 1600));
+  assert.equal(polls(f), at, 'and no watcher left behind');
+  console.log('  hq refusing the link is an error at once, not a silent wait');
+}
+
+{
+  const f = fake();
+  const hq = fakeHq();
+  hq.create = async () => { throw new Error('connect ECONNREFUSED hq.sock'); };
+  f.deps.handoffs = hq;
+  await assert.rejects(() => tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 60 }), /NOT asked.*ECONNREFUSED/s);
+  console.log('  hq not answering on its socket is an error too');
+}
+
+{
+  // The laptop: no hq at all. The chat message is the ask, as before.
+  const f = fake();
+  const hq = fakeHq();
+  let asked = 0;
+  hq.create = async () => ({ ok: false, reason: 'hq is not reachable here (no hq.sock)', noHq: true });
+  f.deps.handoffs = hq;
+  f.deps.ask = async () => { asked++; return { ok: true }; };
+  setTimeout(() => { f.page.url = 'https://site.example/done'; }, 1600);
+  const result = await tool(f).handle({ need: 'login', what: 'Sign in', timeoutSeconds: 20 });
+  assert.equal(asked, 1);
+  assert.match(result, /has done it/);
+  console.log('  no hq on the machine: the message alone, as before');
 }
 
 // ── the phone gets the page the agent is on, not the window it started in ───

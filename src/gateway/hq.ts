@@ -14,8 +14,10 @@ import path from 'node:path';
  *
  * Reached over hq's local socket, `$COMPANY_STATE_DIR/hq.sock` (the same one
  * the company MCP writes to; file permissions are the auth). No socket — the
- * laptop, or hq down — means no handoff, and the ask falls back to the message
- * alone. `BROWSER_ASK_HQ=off` turns it off.
+ * laptop — means no handoff, and the ask is the message alone. A socket that
+ * is there but does not give a link (hq refused, crashed and left the socket,
+ * or did not answer) is an error to the agent, never a silent message-only
+ * wait: the user's app would have no card. `BROWSER_ASK_HQ=off` turns it off.
  */
 
 export type HandoffView = {
@@ -31,7 +33,8 @@ export type HandoffView = {
 export type HandoffCreated =
   | { ok: true; link: string; handoff: HandoffView }
   | { ok: false; busy: HandoffView; reason: string }
-  | { ok: false; busy?: undefined; reason: string };
+  /** `noHq`: no hq on this machine (the laptop) — the ask goes out as the message alone. Otherwise hq refused or failed. */
+  | { ok: false; busy?: undefined; reason: string; noHq?: true };
 
 export type HqHandoffs = {
   /** The company identity this session asks as (COMPANY_IDENTITY), or null for a personal session. */
@@ -105,7 +108,7 @@ export function hqHandoffs(): HqHandoffs {
     async create(req) {
       const sock = hqSocket();
       if (!sock)
-        return { ok: false, reason: 'hq is not reachable here (no hq.sock)' };
+        return { ok: false, reason: 'hq is not reachable here (no hq.sock)', noHq: true };
       const r = await call(sock, 'POST', '/v1/handoffs', { identity, ...req }, 20_000);
       if (r.status === 200 && typeof r.json['link'] === 'string')
         return { ok: true, link: r.json['link'] as string, handoff: r.json['handoff'] as HandoffView };

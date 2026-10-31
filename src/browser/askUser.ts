@@ -76,6 +76,16 @@ const NEEDS = {
   other: 'something else only a person can do here',
 } as const;
 
+/** The same, for the message the user reads. */
+const NEEDS_HE: Record<keyof typeof NEEDS, string> = {
+  captcha: 'אימות "אני לא רובוט"',
+  login: 'כניסה לחשבון, כולל אימות דו-שלבי',
+  payment: 'פרטי כרטיס או תשלום',
+  'form-field': 'שדה בטופס שאי אפשר לדעת מהדף מה למלא בו',
+  consent: 'אישור עוגיות, תנאים או הרשאה',
+  other: 'משהו שרק אתה יכול לעשות כאן',
+};
+
 /**
  * One probe of the page: where it is, and whether the caller's marker text is
  * present. Kept to a single evaluate so watching costs one round trip.
@@ -247,8 +257,9 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         'This brings your tab to the front, sends the user a message on their phone with a screenshot ' +
         'of the page — and, on the company server, a one-time link that shows them just your tab — and then ' +
         'waits. It returns as soon as the page shows they are done or they press "done" on the phone — they do ' +
-        'not have to come back and tell you. If the message cannot be sent, it fails at once and says ' +
-        'why; then tell the user yourself, in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
+        'not have to come back and tell you. If the message cannot be sent — or, on the company server, hq ' +
+        'cannot make the phone link — it fails at once and says why; then fix that or tell the user yourself, ' +
+        'in your reply, what is needed. Give `untilTextGone` or `untilTextAppears` when you can ' +
         'name what will change, and it will notice within a second or two instead of waiting for a URL ' +
         'change.\n\n' +
         (deps.handoffs
@@ -263,10 +274,11 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         need: z.enum(['captcha', 'login', 'payment', 'form-field', 'consent', 'other'])
             .describe('What kind of step this is.'),
         what: z.string().describe(
-            'What the user should do, concretely, in their words. e.g. "Tick the reCAPTCHA box at the ' +
-            'bottom of the form" or "Sign in with the Google account you use for Cloudflare".'),
+            'What the user should do, concretely. It reaches them exactly as written, so write it in ' +
+            'Hebrew — they do not read English. e.g. "לסמן את התיבה של reCAPTCHA בתחתית הטופס" or ' +
+            '"להיכנס עם חשבון הגוגל של Cloudflare".'),
         why: z.string().optional().describe(
-            'Why you cannot do it yourself, in one line. Skip it when it is obvious.'),
+            'Why you cannot do it yourself, in one line, in Hebrew like `what`. Skip it when it is obvious.'),
         untilTextGone: z.string().optional().describe(
             'Text on the page now that will be gone once they are done, e.g. the challenge prompt.'),
         untilTextAppears: z.string().optional().describe(
@@ -309,19 +321,36 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
         const busy = handoff && !handoff.ok ? handoff.busy : undefined;
         if (busy && busy.from !== deps.handoffs!.identity)
           return waitForOthersLogin(deps.handoffs!, busy, seconds, signal);
+        /*
+         * hq is here and did not open the link: the user's app gets no card, so
+         * falling back to the chat message and waiting is the silent "still
+         * running" this must never be (31/10: hq refused a file:// page with a
+         * 400, the agent waited out its timeout, and the user saw only a bare
+         * tool row). Its reason says what to fix — usually the tab.
+         */
+        if (handoff && !handoff.ok && !handoff.busy && !handoff.noHq) {
+          // "NOT asked" (and "NOT notified" below) is read by the company app: it marks the card as never sent.
+          const tab = /blank|not open/.test(handoff.reason)
+            ? ' (`browser_tabs select` the tab with the page they must act on)'
+            : '';
+          throw new Error(
+              `the user was NOT asked — hq could not open the phone link: ${handoff.reason}. ` +
+              `Fix what that says${tab} and call this again. If you cannot, tell the user directly what is ` +
+              `needed (${what}) and report this error.`);
+        }
         // Our own live link for this site is already on their phone: wait on it, do not send another.
         const handoffId = handoff?.ok ? handoff.handoff.id : busy?.id;
         const link = handoff?.ok ? handoff.link : undefined;
 
+        // In Hebrew: this is read by the user, and he does not read English (agent-company dir-0002).
         const message =
           `${what}\n\n` +
           `${why ? `${why}\n\n` : ''}` +
           (link
-            ? `This is ${NEEDS[need] ?? NEEDS.other}. Open this on your phone — it shows only that page, at ` +
-              `phone size, with your keyboard (one device, 10 minutes): ${link}\nPress "סיימתי" when done; ` +
-              `I carry on by myself.`
-            : `This is ${NEEDS[need] ?? NEEDS.other}. Your browser tab has been brought to the front — ` +
-              `do it there and I will carry on by myself. You do not need to reply here.`);
+            ? `זה ${NEEDS_HE[need] ?? NEEDS_HE.other}. פתח את הקישור בטלפון: הוא מציג רק את הדף הזה, בגודל של ` +
+              `טלפון ועם המקלדת שלך (מכשיר אחד, 10 דקות): ${link}\nכשתסיים, לחץ "סיימתי" ואני אמשיך לבד.`
+            : `זה ${NEEDS_HE[need] ?? NEEDS_HE.other}. הטאב בדפדפן הובא לחזית. עשה את זה שם ואני אמשיך לבד, ` +
+              `אין צורך לענות כאן.`);
 
         /*
          * Taken here rather than earlier: after the tab is raised, so it is the
@@ -340,7 +369,7 @@ export function askUserTools(deps: AskDeps): LocalTool[] {
          */
         const delivery: AskDelivery = busy
           ? { ok: true }
-          : await deps.ask(`Your turn: ${what.slice(0, 80)}`, message, shot, link)
+          : await deps.ask(`תורך: ${what.slice(0, 80)}`, message, shot, link)
               .catch((error: unknown) => ({ ok: false as const, reason: String(error) }));
         if (!delivery.ok && !handoffId) {
           throw new Error(
