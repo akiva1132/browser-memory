@@ -37,7 +37,7 @@ const titles = async (domain: string = DOMAIN): Promise<string[]> =>
     const observer = new Observer(memoryDir, session);
     await observer.navigated(GMAIL, '/mail/u/0');
     const step = (tool: string, element: string, target: string) =>
-      observer.saw(tool, { element, target, text: 'you@example.com' }, 'ok', false);
+      observer.saw(tool, { element, target, text: 'dana@example.com' }, 'ok', false);
     await step('browser_type', 'To field', 'div[data-compose="now"] input[role="combobox"]');
     await step('browser_type', 'Subject field', 'div[data-compose="now"] input[name="subjectbox"]');
     await step('browser_type', 'Message body', 'div[data-compose="now"] div[role="textbox"]');
@@ -66,7 +66,7 @@ const titles = async (domain: string = DOMAIN): Promise<string[]> =>
   assert.match(landmark.body, /← css/,
       'but marked: it is tied to how the page is built, and fails differently from an anchor');
   assert.match(landmark.gist, /To field → Subject field/, 'and the order they go in');
-  assert.ok(!landmark.body.includes('you@example.com'),
+  assert.ok(!landmark.body.includes('dana@example.com'),
       'what was typed belonged to one errand and must not be stored');
   console.log(`  captured the flow on its first sighting: ${landmark.title}`);
 
@@ -88,7 +88,7 @@ const titles = async (domain: string = DOMAIN): Promise<string[]> =>
       'with the marking kept out of the address itself');
 
   // The value itself never reaches disk.
-  assert.ok(!landmark.body.includes('you@example.com'),
+  assert.ok(!landmark.body.includes('dana@example.com'),
       'the address in the To field is the errand; the To field is the site');
   console.log(`  and the steps are recoverable from it: ${steps.length}, each marked CSS`);
 }
@@ -311,7 +311,7 @@ const titles = async (domain: string = DOMAIN): Promise<string[]> =>
   await observer.saw('browser_fill_form', {
     fields: [
       { target: 'e16', name: 'Full name', type: 'textbox', value: 'Dana Levi' },
-      { target: 'e19', name: 'Email', type: 'textbox', value: 'you@example.com' },
+      { target: 'e19', name: 'Email', type: 'textbox', value: 'dana@example.com' },
       { target: 'e21', name: 'Subscribe', type: 'checkbox', value: 'true' },
     ],
   }, 'ok', false);
@@ -326,7 +326,7 @@ const titles = async (domain: string = DOMAIN): Promise<string[]> =>
   assert.deepEqual(unpacked.map(step => step.tool),
       ['browser_type', 'browser_type', 'browser_click', 'browser_click'],
       'each field gets the tool its own reported type is driven by — a checkbox is clicked');
-  assert.ok(!lesson.body.includes('you@example.com'),
+  assert.ok(!lesson.body.includes('dana@example.com'),
       'and nothing that was typed reaches disk, exactly as with a direct call');
   console.log(`  one fill_form became ${unpacked.length - 1} steps`);
 }

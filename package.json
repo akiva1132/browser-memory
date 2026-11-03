@@ -18,9 +18,9 @@
     "eval": "node scripts/browserLock.ts node eval/run.ts",
     "eval:compare": "node scripts/browserLock.ts node eval/run.ts --compare"
   },
-  "keywords": [],
+  "keywords": ["mcp", "playwright", "browser-automation", "ai-agents", "agent-memory"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

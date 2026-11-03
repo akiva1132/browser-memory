@@ -54,7 +54,7 @@ try {
     const observer = new Observer(memoryDir, 'span-1');
     await observer.navigated(site, '/apply-1', 'went');
     const step = driver(observer, site);
-    await step('browser_type', 'Full name', '/apply-1', 'landed', 'Akiva');
+    await step('browser_type', 'Full name', '/apply-1', 'landed', 'Dana');
     await step('browser_type', 'Email', '/apply-1', 'landed', 'a@example.com');
     // The commit that hands over to page two.
     await step('browser_click', 'Continue to institution', '/apply-2');

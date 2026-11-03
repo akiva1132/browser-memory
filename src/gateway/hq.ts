@@ -6,7 +6,7 @@ import path from 'node:path';
 /**
  * The company's hq, which owns the tab handoff (agent-company B.9).
  *
- * On the server a person cannot reach the server's browser from where they are —
+ * On a headless server a person cannot reach the server's browser from where they are —
  * their phone. hq can: it issues a one-time link that shows only this session's
  * tab, at phone size, with the phone's own keyboard (and its SMS-code autofill),
  * puts it in the owner's "waiting for you" list with a push, and says the moment

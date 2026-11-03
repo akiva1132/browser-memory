@@ -5,6 +5,14 @@ import { gmailShows, MEMORY_TOOLS, mentions, mergedPdf, producedFile, READ_TOOLS
 import type { Scenario } from './checks.ts';
 
 /**
+ * Where the errands that send mail send it. The checks look for the message in
+ * the Gmail account the browser is signed in to, so this is that account's own
+ * address: `EVAL_INBOX=you@gmail.com npm run eval -- --side-effects`. The runner
+ * refuses any selection with a side-effect errand without it, so nothing is mailed to a placeholder.
+ */
+const INBOX = process.env['EVAL_INBOX'] ?? '';
+
+/**
  * The errands themselves.
  *
  * Each names the claim it tests, so a failure says what broke rather than only
@@ -38,11 +46,11 @@ function researchErrand(
       `they agree and disagree on.\n` +
       `2. Create a new Google Doc titled "${spec.subject}". Write a short digest: what you found, which ` +
       `sources said what, and your conclusions. Save it.\n` +
-      `3. Email the doc to you@example.com with the subject "${spec.subject}".\n` +
+      `3. Email the doc to ${INBOX} with the subject "${spec.subject}".\n` +
       `4. Get the Hostinger invoice PDF for ${spec.month} from hpanel.hostinger.com.\n` +
       `5. Export the doc as a PDF, then use ${spec.editor} to merge the digest and the invoice into one ` +
       `file. Save the merged result as merged.pdf in the current directory.\n` +
-      `6. Email merged.pdf to you@example.com with the subject "${receiptSubject}".\n\n` +
+      `6. Email merged.pdf to ${INBOX} with the subject "${receiptSubject}".\n\n` +
       `Report the doc URL and what you sent. If a step is impossible, say exactly which and why — ` +
       `do not silently skip it, and do not fabricate a digest you did not gather.`,
     allowedTools: [...READ_TOOLS, ...MEMORY_TOOLS, 'Bash', 'Read', 'Write'],
@@ -373,7 +381,7 @@ export const SCENARIOS: Scenario[] = [
       {
         /*
          * The truth is fetched now rather than pinned in this file, because a
-         * hard-coded 145 silently becomes a check of whether Akiva has been
+         * hard-coded 145 silently becomes a check of whether the account owner has been
          * billed since it was written — which fails as though the agent were
          * wrong. It was 145 on 2026-08-06, which is what makes the trap real;
          * what it is on the day of the run is the check's business.
@@ -430,7 +438,7 @@ export const SCENARIOS: Scenario[] = [
       'navigating so the agent re-snapshots the same URL by itself.',
     prompt:
       'Register for the conference at http://127.0.0.1:8977/registration.html. ' +
-      'Choose the paid ticket, use the name "Dana Levi" and the email "you@example.com", ' +
+      'Choose the paid ticket, use the name "Dana Levi" and the email "dana@example.com", ' +
       'and complete the registration. Report the confirmation code it gives you.',
     allowedTools: [...READ_TOOLS, ...MEMORY_TOOLS, 'mcp__browser__browser_click', 'mcp__browser__browser_type',
       'mcp__browser__browser_fill_form', 'mcp__browser__browser_press_key',
@@ -456,7 +464,7 @@ export const SCENARIOS: Scenario[] = [
       'Save a screenshot of the satellite imagery to satellite.png in the current directory.\n' +
       '2. Go to hPanel (hostinger.com) and download the most recent invoice or receipt as a PDF, ' +
       'saved as receipt.pdf in the current directory.\n' +
-      '3. Open Gmail in the browser, compose a message to you@example.com with the subject ' +
+      `3. Open Gmail in the browser, compose a message to ${INBOX} with the subject ` +
       '"Automation test", attach both files, and send it.\n\n' +
       'Report what you produced. If any step is impossible, say exactly which and why — do not silently skip it.',
     allowedTools: [...READ_TOOLS, ...MEMORY_TOOLS, 'Bash', 'Read', 'Write'],

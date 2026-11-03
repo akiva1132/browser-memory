@@ -170,7 +170,7 @@ export function credentialTools(deps: CredentialDeps): LocalTool[] {
         username: z.string().optional().describe('Username, email, or account id.'),
         password: z.string().optional().describe('Password. Never echo this back to the user or into your reply.'),
         googleAccount: z.string().optional().describe(
-            'Which account to choose at a Google "Choose an account" screen, e.g. "you@example.com".'),
+            'Which account to choose at a Google "Choose an account" screen, e.g. "you@gmail.com".'),
         note: z.string().optional().describe(
             'Non-secret hint for next time, e.g. "use the Sign in with Google button, the form rejects this".'),
       },

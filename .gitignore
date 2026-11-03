@@ -18,3 +18,5 @@ eval/discarded/
 *.jpg
 *.jpeg
 *.pdf
+# Images for the README are the exception.
+!/docs/*.png

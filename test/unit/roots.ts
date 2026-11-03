@@ -76,9 +76,13 @@ for (const [where, declared] of [['scripts.start', manifest.scripts.start.replac
       `package.json ${where} points somewhere else`);
 
 // The agreement between the two processes, stated once and checked here.
-const config = JSON.parse(fs.readFileSync(path.join(projectRoot, 'playwright-mcp.config.json'), 'utf8'));
-assert.equal(config.outputDir, installed.output,
-    'the upstream server and the gateway must name the same output directory');
+// The config sits beside the checkout on an installed server; a bare clone has
+// none, and there is no agreement to check.
+const configFile = path.join(projectRoot, 'playwright-mcp.config.json');
+const config = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : null;
+if (config)
+  assert.equal(config.outputDir, installed.output,
+      'the upstream server and the gateway must name the same output directory');
 
 // The overrides still win — the harnesses depend on it for every other suite.
 const redirected = resolvedIn({ BROWSER_MEMORY_DIR: '/tmp/elsewhere', PLAYWRIGHT_MCP_OUTPUT_DIR: '/tmp/out' });
@@ -86,5 +90,5 @@ assert.equal(redirected.memory, '/tmp/elsewhere', 'BROWSER_MEMORY_DIR must still
 assert.equal(redirected.output, '/tmp/out', 'PLAYWRIGHT_MCP_OUTPUT_DIR must still redirect the output');
 
 const shown = (p: string) => path.relative(projectRoot, p) || '.';
-console.log(`  store → ${shown(installed.memory)}, output → ${shown(installed.output)}, both agreed with by the config`);
+console.log(`  store → ${shown(installed.memory)}, output → ${shown(installed.output)}, ${config ? 'both agreed with by the config' : 'no upstream config beside the checkout'}`);
 console.log('ROOTS OK');

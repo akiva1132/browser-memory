@@ -16,7 +16,7 @@ import { trace } from './context.ts';
  * Configured through the environment: `BROWSER_ASK_TARGET` (chat id),
  * `BROWSER_ASK_CHANNEL`, and `BROWSER_ASK_CMD` (anything speaking
  * `message send --channel C -t T -m M [--media F]`; defaults to `openclaw` for
- * history, but on the server it is `~/bin/telegram-send`). Unset target is
+ * history, but a server may point it at a `telegram-send` script). Unset target is
  * reported as a failure, not treated as a quiet no-op.
  */
 

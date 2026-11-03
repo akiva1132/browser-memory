@@ -310,6 +310,13 @@ if (only && selected.length !== only.split(',').length) {
   process.exit(1);
 }
 
+// Decided on what will actually run: `--only` picks a mailing errand without
+// the flag, and a placeholder address is still an address mail goes to.
+if (selected.some(scenario => scenario.sideEffects) && !process.env['EVAL_INBOX']) {
+  console.error('This run sends mail: set EVAL_INBOX to the address of the Gmail account the browser is signed in to.');
+  process.exit(1);
+}
+
 if (!selected.length) {
   console.error(only ? `No scenario "${only}".` : 'Nothing selected.');
   process.exit(1);

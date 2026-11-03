@@ -61,10 +61,10 @@ const lessons = [
     url: 'https://hpanel.hostinger.com',
     kind: 'auth',
     title: 'Log in by hand once; the browser profile keeps the session',
-    gist: 'Never type credentials — navigate to the login page, stop, and let Akiva log in.',
+    gist: 'Never type credentials — navigate to the login page, stop, and let the user log in.',
     body: 'The persistent Chrome profile keeps cookies across sessions, so check whether you are already ' +
       'authenticated before asking. Hostinger tokens do expire within hours, unlike Google. When they lapse, ' +
-      'navigate to the login page and wait for Akiva rather than attempting the login yourself.',
+      'navigate to the login page and wait for the user rather than attempting the login yourself.',
     tags: ['login', 'session', 'cookies'],
   },
   {
