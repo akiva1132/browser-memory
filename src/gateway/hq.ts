@@ -126,3 +126,42 @@ export function hqHandoffs(): HqHandoffs {
     },
   };
 }
+
+/**
+ * Who owns each tab of the shared browser is hq's to keep (agent-company tab/tabs.ts): it watches Chrome's
+ * targets live, and a tab that appears while this session's call is in flight is this session's. So every
+ * browser call is reported, begin and end, with the shift the session works for, and the session says bye when
+ * it goes. Then the tabs a session opened — every one of them, not only the first, including the ones a
+ * `page.context().newPage()` inside run_code opened — close when its shift ends, and the ones it left idle for
+ * hours close too. That replaces counting on this process to remember them: 35 tabs of finished work held
+ * 10GB of the server on 18/11/2026.
+ *
+ * Best effort and quick. No socket (the laptop), or hq not answering, means no report: the call goes on.
+ * After a failure the reports pause for a minute, so an hq that hangs costs one short wait, not one per call.
+ */
+const ACTIVITY_TIMEOUT_MS = 500;
+const ACTIVITY_PAUSE_MS = 60_000;
+let activityPausedUntil = 0;
+
+export async function reportActivity(op: 'begin' | 'end' | 'bye', session: string): Promise<{ lost?: boolean }> {
+  if (Date.now() < activityPausedUntil)
+    return {};
+  const sock = hqSocket();
+  if (!sock)
+    return {};
+  try {
+    const r = await call(sock, 'POST', '/v1/browser', {
+      op, session, pid: process.pid,
+      identity: env('COMPANY_IDENTITY') || null, shift: env('COMPANY_SHIFT') || null,
+    }, op === 'bye' ? 1500 : ACTIVITY_TIMEOUT_MS);
+    if (r.status !== 200) {
+      // An hq from before this route answers 404: the same pause, not a request per call.
+      activityPausedUntil = Date.now() + ACTIVITY_PAUSE_MS;
+      return {};
+    }
+    return { lost: r.json['lost'] === true };
+  } catch {
+    activityPausedUntil = Date.now() + ACTIVITY_PAUSE_MS;
+    return {};
+  }
+}

@@ -21,8 +21,9 @@ import { prune } from '../lib/rotate.ts';
 import { bodyOf } from '../lib/toolResult.ts';
 import type { ToolResult } from '../lib/toolResult.ts';
 import {
-  apiMap, audit, observer, OUTPUT_DIR, OUTPUT_KEEP_DAYS, places, tabs, UPSTREAM,
+  apiMap, audit, observer, OUTPUT_DIR, OUTPUT_KEEP_DAYS, places, session, tabs, UPSTREAM,
 } from './context.ts';
+import { reportActivity } from './hq.ts';
 
 /**
  * The upstream server restarts independently of us (systemd owns it), so the
@@ -203,12 +204,26 @@ async function noteClaim(outcome: 'claimed' | 'unenumerable' | 'ambiguous'): Pro
 export async function callUpstream(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   if (!name.startsWith('browser_'))
     return rawCall(name, args);
-  const claimAfter = await ensureOwnTab(
-      name === 'browser_tabs' && args['action'] === 'new').catch(() => undefined);
-  const result = await rawCall(name, args);
-  if (claimAfter)
-    await noteClaim(await tabs.claim(claimAfter).catch(() => 'unenumerable' as const));
-  return result;
+  // hq records whatever tab appears during this call as this session's (hq.ts reportActivity), so the report
+  // goes out before the call reaches the browser and the end after its answer.
+  const { lost } = await reportActivity('begin', session);
+  try {
+    // hq closed this session's tab (left idle for hours). Playwright has moved its current tab to whatever is
+    // left — somebody else's page — so the session opens a new one of its own before it touches anything.
+    if (lost) {
+      ownTab = undefined;
+      await tabs.release().catch(() => {});
+      audit.record({ tool: '_tabs', outcome: 'ok', note: 'hq closed this session\'s idle tab; opening a new one' });
+    }
+    const claimAfter = await ensureOwnTab(
+        name === 'browser_tabs' && args['action'] === 'new').catch(() => undefined);
+    const result = await rawCall(name, args);
+    if (claimAfter)
+      await noteClaim(await tabs.claim(claimAfter).catch(() => 'unenumerable' as const));
+    return result;
+  } finally {
+    void reportActivity('end', session);
+  }
 }
 
 /**
@@ -310,11 +325,14 @@ async function releaseNow(): Promise<void> {
       new Promise(resolve => setTimeout(resolve, 1500)),
     ]);
   }
-  if (!ownTab)
-    return;
-  await Promise.race([
-    rawCall('browser_tabs', { action: 'close' }).catch(() => {}),
-    new Promise(resolve => setTimeout(resolve, 2500)),
-  ]);
-  await tabs.release().catch(() => {});
+  if (ownTab) {
+    await Promise.race([
+      rawCall('browser_tabs', { action: 'close' }).catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 2500)),
+    ]);
+    await tabs.release().catch(() => {});
+  }
+  // Every other tab this session opened (run_code's newPage, a popup, a second browser_tabs new) is hq's to
+  // close: it knows them, this process only ever knew the first.
+  await reportActivity('bye', session);
 }
