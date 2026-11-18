@@ -206,7 +206,8 @@ export async function callUpstream(name: string, args: Record<string, unknown>):
     return rawCall(name, args);
   // hq records whatever tab appears during this call as this session's (hq.ts reportActivity), so the report
   // goes out before the call reaches the browser and the end after its answer.
-  const { lost } = await reportActivity('begin', session);
+  // With the tab it works in, so hq keeps that one (and only that one) touched, and adopts it if its opening was missed.
+  const { lost, sent } = await reportActivity('begin', session, { target: tabs.owned });
   try {
     // hq closed this session's tab (left idle for hours). Playwright has moved its current tab to whatever is
     // left — somebody else's page — so the session opens a new one of its own before it touches anything.
@@ -222,7 +223,8 @@ export async function callUpstream(name: string, args: Record<string, unknown>):
       await noteClaim(await tabs.claim(claimAfter).catch(() => 'unenumerable' as const));
     return result;
   } finally {
-    void reportActivity('end', session);
+    if (sent)
+      void reportActivity('end', session, { target: tabs.owned, force: true });
   }
 }
 

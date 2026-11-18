@@ -142,9 +142,14 @@ export function hqHandoffs(): HqHandoffs {
 const ACTIVITY_TIMEOUT_MS = 500;
 const ACTIVITY_PAUSE_MS = 60_000;
 let activityPausedUntil = 0;
+/** For tests: start again with no pause. */
+export const resumeActivityReports = (): void => { activityPausedUntil = 0; };
 
-export async function reportActivity(op: 'begin' | 'end' | 'bye', session: string): Promise<{ lost?: boolean }> {
-  if (Date.now() < activityPausedUntil)
+export async function reportActivity(op: 'begin' | 'end' | 'bye', session: string,
+    opts: { target?: string; force?: boolean } = {}): Promise<{ lost?: boolean; sent?: boolean }> {
+  // `force`: the end of a begin that went out. A begin that timed out may still have reached hq, and an end that
+  // never comes would leave hq thinking this session is mid-call — owning whatever tab opens next.
+  if (!opts.force && Date.now() < activityPausedUntil)
     return {};
   const sock = hqSocket();
   if (!sock)
@@ -153,15 +158,16 @@ export async function reportActivity(op: 'begin' | 'end' | 'bye', session: strin
     const r = await call(sock, 'POST', '/v1/browser', {
       op, session, pid: process.pid,
       identity: env('COMPANY_IDENTITY') || null, shift: env('COMPANY_SHIFT') || null,
+      ...(opts.target ? { target: opts.target } : {}),
     }, op === 'bye' ? 1500 : ACTIVITY_TIMEOUT_MS);
     if (r.status !== 200) {
       // An hq from before this route answers 404: the same pause, not a request per call.
       activityPausedUntil = Date.now() + ACTIVITY_PAUSE_MS;
-      return {};
+      return { sent: true };
     }
-    return { lost: r.json['lost'] === true };
+    return { lost: r.json['lost'] === true, sent: true };
   } catch {
     activityPausedUntil = Date.now() + ACTIVITY_PAUSE_MS;
-    return {};
+    return { sent: true };
   }
 }
